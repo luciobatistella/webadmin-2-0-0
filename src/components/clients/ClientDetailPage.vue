@@ -18,7 +18,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import ClientEditModal from '@/components/ClientEditModal.vue'
+import ClientEditModal from './ClientEditModal.vue'
 import Breadcrumbs from '@/components/Breadcrumbs.vue'
 import { getClient } from '@/services/clients'
 
