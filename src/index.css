@@ -1,0 +1,19 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design tokens (opcionais) */
+:root {
+  --radius: 0.5rem;
+}
+
+.btn {
+  @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 font-medium transition-colors duration-150;
+}
+.btn-primary {
+  @apply bg-brand-600 text-white hover:bg-brand-700 active:bg-brand-800;
+}
+.card {
+  @apply rounded-lg bg-white shadow-sm ring-1 ring-black/5 dark:bg-zinc-900;
+}
+
