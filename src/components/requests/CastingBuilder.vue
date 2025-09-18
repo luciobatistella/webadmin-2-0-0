@@ -222,9 +222,10 @@ const hasStage = ref<boolean>(!!props.initialHasStage)
 // Nova estrutura do carrinho - por data e período
 interface PeriodAssignment {
   date: string
-  period: 'manha' | 'tarde' | 'noite'
+  period: 'manha' | 'tarde' | 'noite' | 'extra'
   qty: number
   price: number
+  isExtra?: boolean
 }
 
 interface CartLine {
@@ -330,7 +331,11 @@ function recalcAllPrices() {
   try {
     cart.value.forEach(line => {
       line.assignments.forEach(a => {
-        a.price = calculatePrice(line.key, a.date, a.period)
+        if (a.isExtra) {
+          a.price = 0
+        } else {
+          a.price = calculatePrice(line.key, a.date, a.period as 'manha' | 'tarde' | 'noite')
+        }
       })
     })
   } catch {}
@@ -467,6 +472,7 @@ const addAllPeriods = (roleKey: string) => {
   const cartItem = cart.value.find(item => item.key === roleKey)
   if (!cartItem) return
 
+  // Períodos normais
   eventPeriods.value.forEach(period => {
     const exists = cartItem.assignments.some(a => a.date === period.date && a.period === period.period)
     if (!exists) {
@@ -478,6 +484,17 @@ const addAllPeriods = (roleKey: string) => {
       })
     }
   })
+
+  // Hora extra (exibição) — adiciona uma linha por data com preço 0
+  if (props.resumoOperacao?.temHoraExtra) {
+    const dates = Array.from(new Set(eventPeriods.value.map(p => p.date)))
+    dates.forEach(date => {
+      const existsExtra = cartItem.assignments.some(a => a.date === date && a.period === 'extra')
+      if (!existsExtra) {
+        cartItem.assignments.push({ date, period: 'extra', qty: 1, price: 0, isExtra: true })
+      }
+    })
+  }
 }
 
 
@@ -525,13 +542,13 @@ function toggleOpen(key: string) { openMap.value[key] = !isOpen(key) }
 
 // Métricas por item
 const itemProfessionalsRaw = (item: CartLine) => {
-  try { return (item.assignments || []).reduce((acc, a) => acc + (Number(a.qty) || 0), 0) } catch { return 0 }
+  try { return (item.assignments || []).filter(a => !a.isExtra).reduce((acc, a) => acc + (Number(a.qty) || 0), 0) } catch { return 0 }
 }
 const itemDaysCount = (item: CartLine) => {
   try { return Array.from(new Set((item.assignments || []).map(a => a.date))).length } catch { return 0 }
 }
 const itemPeriodsCount = (item: CartLine) => {
-  try { return (item.assignments || []).length } catch { return 0 }
+  try { return (item.assignments || []).filter(a => !a.isExtra).length } catch { return 0 }
 }
 
 // Profissionais ajustado à escala (evita duplicar por períodos do mesmo dia)
@@ -559,7 +576,7 @@ watch(cart, (v) => {
 // Estatísticas do carrinho
 const totalProfessionals = computed(() => {
   return cart.value.reduce((total, cartItem) => {
-    const itemTotal = cartItem.assignments.reduce((assignmentTotal, assignment) => {
+    const itemTotal = cartItem.assignments.filter(a => !a.isExtra).reduce((assignmentTotal, assignment) => {
       return assignmentTotal + assignment.qty
     }, 0)
     return total + itemTotal
@@ -601,6 +618,13 @@ function seedFromEquipes() {
         price: calculatePrice(key, period.date, period.period)
       })
     })
+    // Hora extra por data (somente exibi e7 e3o)
+    if (props.resumoOperacao?.temHoraExtra) {
+      const dates = Array.from(new Set(eventPeriods.value.map(p => p.date)))
+      dates.forEach(date => {
+        newItem.assignments.push({ date, period: 'extra', qty: Math.max(0, line.quantidade || 0), price: 0, isExtra: true })
+      })
+    }
     cart.value.push(newItem)
   })
 }
@@ -663,6 +687,12 @@ function seedFromPlannedRoles() {
         price: calculatePrice(role.key, period.date, period.period)
       })
     })
+    if (props.resumoOperacao?.temHoraExtra) {
+      const dates = Array.from(new Set(eventPeriods.value.map(pp => pp.date)))
+      dates.forEach(date => {
+        newItem.assignments.push({ date, period: 'extra', qty: Math.max(0, p.quantidade || 0), price: 0, isExtra: true })
+      })
+    }
     newCart.push(newItem)
   })
   cart.value = newCart
@@ -671,7 +701,7 @@ function seedFromPlannedRoles() {
 
 const totalPeriods = computed(() => {
   return cart.value.reduce((total, cartItem) => {
-    return total + cartItem.assignments.length
+    return total + cartItem.assignments.filter(a => !a.isExtra).length
   }, 0)
 })
 
@@ -693,10 +723,15 @@ function addWithQuantity(roleKey: string, quantity: number) {
   if (existing) {
     // Se já existe, atualiza as quantidades
     existing.assignments.forEach(assignment => {
-
-
       assignment.qty = quantity
     })
+    if (props.resumoOperacao?.temHoraExtra) {
+      const dates = Array.from(new Set(eventPeriods.value.map(p => p.date)))
+      dates.forEach(date => {
+        const existsExtra = existing.assignments.some(a => a.date === date && a.period === 'extra')
+        if (!existsExtra) existing.assignments.push({ date, period: 'extra', qty: quantity, price: 0, isExtra: true })
+      })
+    }
   } else {
     // Cria novo item no carrinho
     const role = catalog.find(r => r.key === roleKey)
@@ -716,6 +751,13 @@ function addWithQuantity(roleKey: string, quantity: number) {
           price: calculatePrice(roleKey, period.date, period.period)
         })
       })
+      // Hora extra por data (somente exibição)
+      if (props.resumoOperacao?.temHoraExtra) {
+        const dates = Array.from(new Set(eventPeriods.value.map(p => p.date)))
+        dates.forEach(date => {
+          newItem.assignments.push({ date, period: 'extra', qty: quantity, price: 0, isExtra: true })
+        })
+      }
 
       cart.value.push(newItem)
     }
@@ -762,8 +804,9 @@ function runAuto() {
 function syncToEquipes() {
   const mapped: EquipLine[] = cart.value.map(cartItem => {
     // Calcula quantidade total e horas médias para compatibilidade
-    const totalQty = cartItem.assignments.reduce((sum, a) => sum + a.qty, 0)
-    const avgHours = cartItem.assignments.length * 6 // 6 horas por período
+    const normals = cartItem.assignments.filter(a => !a.isExtra)
+    const totalQty = normals.reduce((sum, a) => sum + a.qty, 0)
+    const avgHours = normals.length * 6 // 6 horas por período
 
     return {
       funcao_key: cartItem.key,
@@ -871,7 +914,7 @@ watch([() => props.plannedRoles, eventPeriods], async () => {
 
       <!-- Resumo do evento -->
       <div v-if="(props.eventDates?.length || 0) > 0" class="mb-4">
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+        <div class="space-y-3">
           <!-- Datas do evento -->
           <div class="p-3 bg-blue-50 border border-blue-200 rounded-lg">
             <div class="flex items-center gap-2 text-sm text-blue-800 mb-1">
@@ -956,6 +999,8 @@ watch([() => props.plannedRoles, eventPeriods], async () => {
             <strong>Regras de preço:</strong> Dias úteis (base) • Fins de semana (+40%) • Feriados (+60%)
           </div> -->
       </div>
+        </aside>
+        <main class="md:w-[60%]">
 
       <div v-if="!cart.length"
         class="grid place-items-center rounded-xl border border-dashed border-slate-300 p-6 text-slate-500">
@@ -1020,8 +1065,13 @@ watch([() => props.plannedRoles, eventPeriods], async () => {
                   <div class="flex-1">
                     <div class="text-sm font-medium">{{ formatDate(assignment.date) }}</div>
                     <div class="text-xs text-slate-600 capitalize">
-                      {{ assignment.period }} • {{ getDayType(assignment.date) === 'holiday' ? 'Feriado' :
-                        getDayType(assignment.date) === 'weekend' ? 'Fim de semana' : 'Dia útil' }}
+                      <template v-if="!assignment.isExtra">
+                        {{ assignment.period }} • {{ getDayType(assignment.date) === 'holiday' ? 'Feriado' :
+                          getDayType(assignment.date) === 'weekend' ? 'Fim de semana' : 'Dia útil' }}
+                      </template>
+                      <template v-else>
+                        Hora extra (1h)
+                      </template>
                     </div>
                   </div>
 
@@ -1061,7 +1111,7 @@ watch([() => props.plannedRoles, eventPeriods], async () => {
           </div>
         </div>
       </div>
-    </div>
+
 
       <!-- Card final com totais gerais -->
       <div class="mt-6 p-4 bg-slate-50 border border-slate-200 rounded-xl">
@@ -1074,6 +1124,10 @@ watch([() => props.plannedRoles, eventPeriods], async () => {
           <div class="text-lg font-bold text-brand-600">{{ money(total) }}</div>
         </div>
       </div>
+        </main>
+      </div>
+      </div>
+
 
 
   </section>
