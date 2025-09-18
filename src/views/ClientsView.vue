@@ -976,7 +976,7 @@ onUnmounted(() => {
     </div>
 
   <!-- Modal montado fora dos dropdowns para não ser clippado pelo overflow -->
-  <ClientEditModal :model-value="showModal" :edit-id="editId" :form="form" @update:modelValue="(v:boolean)=>showModal=v" @save="save" />
+  <ClientEditModal :model-value="showModal" :edit-id="editId ?? undefined" :form="form" @update:modelValue="(v:boolean)=>showModal=v" @save="save" />
 
 
 

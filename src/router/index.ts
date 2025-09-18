@@ -20,6 +20,7 @@ const routes: RouteRecordRaw[] = [
       { path: '/cooperados', name: 'cooperados', component: () => import('../views/CooperadosView.vue'), meta: { title: 'Cooperados', keepAlive: true } },
       { path: '/billing', name: 'billing', component: () => import('../views/BillingView.vue'), meta: { title: 'Faturamento', keepAlive: true } },
       { path: '/solicitacoes', name: 'solicitacoes', component: () => import('../views/EventView.vue'), meta: { title: 'Solicitações', keepAlive: true } },
+      { path: '/solicitacoes/new', name: 'request-new', component: () => import('../components/requests/SolicitationCreatePage.vue'), meta: { title: 'Nova Solicitação' } },
     ],
   },
 ]

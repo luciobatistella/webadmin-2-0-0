@@ -2,18 +2,226 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Design tokens (opcionais) */
+/* Design tokens */
 :root {
   --radius: 0.5rem;
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --transition: all 0.15s ease-in-out;
 }
 
+/* Base Components */
 .btn {
   @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 font-medium transition-colors duration-150;
+  @apply border border-transparent focus:outline-none focus:ring-2 focus:ring-offset-2;
+  @apply disabled:opacity-50 disabled:cursor-not-allowed;
 }
+
 .btn-primary {
   @apply bg-brand-600 text-white hover:bg-brand-700 active:bg-brand-800;
+  @apply focus:ring-brand-500;
 }
+
+.btn-secondary {
+  @apply bg-white text-gray-700 border-gray-300 hover:bg-gray-50 active:bg-gray-100;
+  @apply focus:ring-brand-500;
+}
+
+.btn-ghost {
+  @apply text-gray-600 hover:text-gray-900 hover:bg-gray-100 active:bg-gray-200;
+  @apply focus:ring-brand-500;
+}
+
+.btn-sm {
+  @apply px-3 py-1.5 text-sm;
+}
+
+.btn-lg {
+  @apply px-6 py-3 text-lg;
+}
+
+/* Input Components */
+.input {
+  @apply w-full rounded-md border border-gray-300 px-3 py-2 text-sm;
+  @apply placeholder:text-gray-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500;
+  @apply disabled:bg-gray-50 disabled:text-gray-500 disabled:cursor-not-allowed;
+  @apply transition-colors duration-150;
+}
+
+.input-error {
+  @apply border-red-300 focus:border-red-500 focus:ring-red-500;
+}
+
+.input-success {
+  @apply border-green-300 focus:border-green-500 focus:ring-green-500;
+}
+
+/* Card Components */
 .card {
   @apply rounded-lg bg-white shadow-sm ring-1 ring-black/5 dark:bg-zinc-900;
+}
+
+.card-elevated {
+  @apply shadow-md ring-1 ring-black/10;
+}
+
+.card-interactive {
+  @apply cursor-pointer transition-all duration-150 hover:shadow-md hover:ring-black/10;
+}
+
+/* Form Components */
+.form-group {
+  @apply space-y-1;
+}
+
+.form-label {
+  @apply text-sm font-medium text-gray-700 dark:text-gray-300;
+}
+
+.form-label-required::after {
+  @apply text-red-500;
+  content: ' *';
+}
+
+.form-error {
+  @apply text-sm text-red-600 dark:text-red-400;
+}
+
+.form-help {
+  @apply text-sm text-gray-500 dark:text-gray-400;
+}
+
+/* Badge Components */
+.badge {
+  @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+}
+
+.badge-primary {
+  @apply bg-brand-100 text-brand-800 dark:bg-brand-900 dark:text-brand-200;
+}
+
+.badge-success {
+  @apply bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200;
+}
+
+.badge-warning {
+  @apply bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200;
+}
+
+.badge-error {
+  @apply bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200;
+}
+
+/* Utility Classes */
+.text-muted {
+  @apply text-gray-500 dark:text-gray-400;
+}
+
+.border-dashed {
+  border-style: dashed;
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-in-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Badge Styles */
+.badge {
+  @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+}
+
+.badge-primary {
+  @apply bg-brand-100 text-brand-800;
+}
+
+.badge-success {
+  @apply bg-green-100 text-green-800;
+}
+
+.badge-warning {
+  @apply bg-yellow-100 text-yellow-800;
+}
+
+.badge-error {
+  @apply bg-red-100 text-red-800;
+}
+
+/* Animation Classes */
+.fade-in {
+  animation: fadeIn 0.3s ease-in-out;
+}
+
+.slide-up {
+  animation: slideUp 0.3s ease-out;
+}
+
+.scale-in {
+  animation: scaleIn 0.2s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Hover Effects */
+.hover-lift {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.hover-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+/* Carrossel Styles */
+.carousel-container {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 #f1f5f9;
+}
+
+.carousel-container::-webkit-scrollbar {
+  height: 6px;
+}
+
+.carousel-container::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 3px;
+}
+
+.carousel-container::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+
+.carousel-container::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Table hover effects */
+.table-row-hover:hover {
+  background-color: #f8fafc;
 }
 

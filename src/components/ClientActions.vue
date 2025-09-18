@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 
+const props = withDefaults(defineProps<{
+  showPrintButton?: boolean
+  showPrintAction?: boolean
+  createLabel?: string
+}>(), {
+  showPrintButton: true,
+  showPrintAction: true,
+  createLabel: 'incluir cadastro',
+})
+
 const emit = defineEmits<{ (e: 'print'): void; (e: 'create'): void; (e: 'action', key: string): void }>()
 const open = ref(false)
 const root = ref<HTMLElement | null>(null)
@@ -28,7 +38,7 @@ onUnmounted(() => {
 
 <template>
   <div class="relative flex items-center gap-2" ref="root">
-    <button class="flex items-center gap-2 rounded-full border bg-white px-3 py-1 text-sm shadow-sm hover:bg-zinc-50"
+    <button v-if="props.showPrintButton" class="flex items-center gap-2 rounded-full border bg-white px-3 py-1 text-sm shadow-sm hover:bg-zinc-50"
       @click="$emit('print')">
       <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border bg-white">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 14h12v8H6z"/></svg>
@@ -38,7 +48,7 @@ onUnmounted(() => {
 
     <button class="rounded-full bg-[#0B61F3] px-3 py-1 text-sm font-semibold text-white shadow-sm hover:bg-blue-600"
       @click="$emit('create')">
-      incluir cadastro
+      {{ props.createLabel }}
     </button>
 
     <div class="relative">
@@ -53,7 +63,7 @@ onUnmounted(() => {
       </button>
       <div v-if="open" class="absolute right-0 z-50 mt-2 w-56 rounded-md border bg-white p-1 shadow-lg">
         <ul class="text-sm p-1">
-          <li>
+          <li v-if="props.showPrintAction">
             <button class="flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-zinc-50" @click="onAction('imprimir')">
               <svg class="h-4 w-4 text-zinc-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 14h12v8H6z"/></svg>
               imprimir

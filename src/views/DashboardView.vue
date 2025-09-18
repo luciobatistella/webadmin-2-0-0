@@ -126,7 +126,7 @@ onMounted(loadRequests)
 </script>
 
 <template>
-  <section class="space-y-4 p-4">
+  <section >
     <Breadcrumbs />
     <header class="flex flex-wrap items-center justify-between gap-2">
       <div>

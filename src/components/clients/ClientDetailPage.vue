@@ -1,10 +1,10 @@
 <template>
-  <section class="space-y-4 p-4">
+  <section >
     <!-- Breadcrumb acima do título -->
     <Breadcrumbs />
 
     <!-- Título sem botão voltar (agora está no breadcrumb) -->
-    <header class="mb-2 flex items-center gap-3">
+    <header class="mb-6 flex items-center gap-3">
       <h1 class="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">{{ pageTitle }}</h1>
       <span class="bg-blue-100 mt-1 text-blue-800 text-xs font-medium me-2 px-2.5 py-0.5 rounded-sm dark:bg-blue-900 dark:text-blue-300">Status Cliente</span>
     </header>
@@ -18,7 +18,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import ClientEditModal from './ClientEditModal.vue'
+import ClientEditModal from '@/components/ClientEditModal.vue'
 import Breadcrumbs from '@/components/Breadcrumbs.vue'
 import { getClient } from '@/services/clients'
 

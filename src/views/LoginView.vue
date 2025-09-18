@@ -58,7 +58,7 @@ async function onSubmit() {
 
       <p v-if="errorMsg" class="text-sm text-red-600">{{ errorMsg }}</p>
 
-      <button type="submit" class="btn btn-primary w-full" :disabled="loading">
+      <button type="submit" class="btn-primary w-full" :disabled="loading">
         <span v-if="!loading">Entrar</span>
         <span v-else class="inline-flex items-center gap-2">
           <svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle class="opacity-25" cx="12" cy="12" r="10" stroke-width="4"/><path class="opacity-75" d="M4 12a8 8 0 018-8" stroke-width="4"/></svg>

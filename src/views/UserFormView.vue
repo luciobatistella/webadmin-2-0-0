@@ -47,8 +47,8 @@ onMounted(load)
     <header class="flex items-center gap-3">
       <h1 class="text-lg font-semibold">{{ isEdit ? 'Editar usuário' : 'Novo usuário' }}</h1>
       <div class="ml-auto">
-        <button class="btn btn-secondary mr-2" @click="$router.back()">Voltar</button>
-        <button class="btn btn-primary" @click="submit" :disabled="loading">Salvar</button>
+        <button class="btn-secondary mr-2" @click="$router.back()">Voltar</button>
+        <button class="btn-primary" @click="submit" :disabled="loading">Salvar</button>
       </div>
     </header>
 

@@ -13,8 +13,8 @@ const hasData = computed(() => (props.items || []).length > 0)
       <header class="mb-3 flex items-center justify-between">
         <h2 class="text-lg font-semibold">Pré-visualização para impressão</h2>
         <div class="space-x-2">
-          <button class="btn btn-secondary" @click="$emit('close')">Fechar</button>
-          <button class="btn btn-primary" :disabled="!hasData" @click="$emit('print')">Imprimir</button>
+          <button class="btn-secondary" @click="$emit('close')">Fechar</button>
+          <button class="btn-primary" :disabled="!hasData" @click="$emit('print')">Imprimir</button>
         </div>
       </header>
       <div class="space-y-2">
