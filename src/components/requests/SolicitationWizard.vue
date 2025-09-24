@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, computed, toRaw, nextTick, onMounted } from 'vue'
+import { ref, watch, computed, toRaw, nextTick, onMounted, onUnmounted } from 'vue'
 import FormWizard from '@/components/ui/FormWizard.vue'
 import ClientSelector from '@/components/ui/ClientSelector.vue'
 import DateRangePicker from '@/components/ui/DateRangePicker.vue'
@@ -7,7 +7,9 @@ import VenueSelector from '@/components/ui/VenueSelector.vue'
 // import CategorySelector from '@/components/ui/CategorySelector.vue' // REMOVIDO
 
 import CastingBuilder from '@/components/requests/CastingBuilder.vue'
+import TurnosResumoOperacao from '@/components/ui/TurnosResumoOperacao.vue'
 import { getAdminConfig } from '@/services/settings'
+import { useAppConfig } from '@/stores/appConfig'
 
 
 // Resumo emitido pelo DateRangePicker (Step 1)
@@ -15,7 +17,7 @@ const resumoOperacao = ref<any|null>(null)
 function onResumoOperacao(r:any){ resumoOperacao.value = r }
 
 // Types matching the required payload
-export interface Turno { nome: string; inicio: string; fim: string }
+export interface Turno { nome: string; inicio: string; fim: string; isPausa?: boolean; isBreak?: boolean; isExtraMarker?: boolean }
 export interface NewSolicitation {
   cliente_id: string
   cliente_nome: string
@@ -30,6 +32,10 @@ export interface NewSolicitation {
   turnos: Turno[]
   turnos_detectados: boolean // true = turnos foram detectados pela entrada inteligente (não alterar)
   estrategia_turnos: boolean // true = minimizar custos, false = minimizar funcionários
+  // Preferências de escala/pausa do usuário no Step 1 (opcionais, para persistência/UI)
+  pausa1h?: boolean
+  tipo_escala?: 'hora' | 'diaria' | 'escala' | null
+  escala_horas?: number
   publico: { convidados_estimados: number; segmentos: string[] }
   acesso: {
     credenciamento: { ativo: boolean; impressao_cracha: boolean }
@@ -59,7 +65,8 @@ export interface NewSolicitation {
 const props = defineProps<{ modelValue: NewSolicitation }>()
 const emit = defineEmits<{
   (e:'update:modelValue', v: NewSolicitation): void
-  (e: 'evento-nome-changed', nome: string): void
+  (e:'evento-nome-changed', nome: string): void
+  (e:'complete', payload: NewSolicitation): void
 }>()
 
 // Local draft for two-way binding
@@ -68,30 +75,10 @@ function deepClone<T>(v: T): T {
     try { return JSON.parse(JSON.stringify(v)) } catch { return v }
   }
 }
-// Fallback local caso /settings ainda não tenha sido configurado
-const FALLBACK_SEGMENTOS = [
-  { id: 'espacos_eventos', nome: 'Espaços de Eventos', icon: '🎪', descricao: 'Casas e espaços multiuso' },
-  { id: 'hoteis', nome: 'Hotéis', icon: '🏨', descricao: 'Salões de eventos e banquetes' },
-]
-
-// Fallback local para categorias de serviços
-const FALLBACK_CATEGORIAS = [
-  { id: 'alimentacao', nome: 'Alimentação & Bebidas', icon: '🍽️', descricao: 'Serviços de gastronomia', servicos: [
-    { nome: 'Coffee Break', icon: '☕', descricao: 'Café, chás, salgados', funcoes: ['Garçom', 'Copeiro', 'Barista'] },
-    { nome: 'Coquetel', icon: '🍸', descricao: 'Drinks e finger food', funcoes: ['Garçom', 'Bartender', 'Copeiro'] },
-    { nome: 'Almoço/Jantar', icon: '🍽️', descricao: 'Refeição completa', funcoes: ['Garçom', 'Maître', 'Copeiro', 'Cozinheiro'] },
-  ]},
-  { id: 'estacionamento', nome: 'Estacionamento & Valet', icon: '🅿️', descricao: 'Manobristas e operação', servicos: [
-    { nome: 'Valet Completo', icon: '🚗', descricao: 'Operação com coordenador', funcoes: ['Manobrista', 'Coordenador de Estacionamento'] },
-    { nome: 'Autoatendimento', icon: '🅿️', descricao: 'Sem valet, apenas ordenação', funcoes: ['Manobrista'] },
-  ]},
-  { id: 'traducao', nome: 'Tradução & Interpretação', icon: '🗣️', descricao: 'Intérpretes e técnica', servicos: [
-    { nome: 'Interpretação Simultânea', icon: '🎧', descricao: 'Cabines e equipe', funcoes: ['Intérprete', 'Técnico de Tradução'] },
-  ]},
-]
-
-// Segmentos de evento (carregados de /settings)
-const segmentosEvento = ref<any[]>([])
+// Config centralizada (sem fallbacks locais)
+const { segmentos: configSegmentos, categorias: configCategorias, catalogRoles, multiplicadores, setorIcons, regrasTurnos, ensureLoaded, loading: configLoading, error: configError } = useAppConfig()
+ensureLoaded()
+const segmentosEvento = computed(() => configSegmentos.value)
 
 const draft = ref<NewSolicitation>(deepClone(props.modelValue))
 
@@ -136,26 +123,148 @@ const hasExtras = computed(() => hasExtraHours(draft.value.turnos))
 
 // Wizard state
 const currentStep = ref(0)
+// Detecta plataforma para exibir label correto (Ctrl / ⌘)
+const isMac = computed(() => /mac|darwin/i.test(navigator.userAgent))
+const primaryModKey = computed(() => isMac.value ? '⌘' : 'Ctrl')
+// Mensagem de bloqueio de navegação
+const navBlockMessage = ref<string>('')
+let navBlockTimeout: any = null
+// --- Navegação por teclado (Ctrl+Seta) ---
+function isStepValid(index: number){
+  const step = wizardSteps?.value?.[index]
+  if (!step) return false
+  // Considera válido se explicitamente true ou não for false
+  return step.isValid !== false
+}
+
+function canGoToStep(targetIndex: number){
+  if (targetIndex < 0) return false
+  if (targetIndex > (wizardSteps.value.length - 1)) return false
+  // Para avançar exige step atual válido
+  if (targetIndex > currentStep.value) return isStepValid(currentStep.value)
+  return true
+}
+
+function goToStep(targetIndex: number){
+  if (canGoToStep(targetIndex)) {
+    currentStep.value = targetIndex
+  } else {
+    console.log('[Wizard] Avanço bloqueado: preencha os campos obrigatórios do passo atual.')
+    navBlockMessage.value = 'Complete os campos obrigatórios para avançar'
+    if (navBlockTimeout) clearTimeout(navBlockTimeout)
+    navBlockTimeout = setTimeout(() => { navBlockMessage.value = '' }, 3000)
+  }
+}
+
+function handleGlobalKeydown(e: KeyboardEvent){
+  if (!(e.ctrlKey || e.metaKey)) return
+  if (e.key === 'ArrowRight') {
+    e.preventDefault()
+    goToStep(currentStep.value + 1)
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault()
+    goToStep(currentStep.value - 1)
+  }
+}
+// Ref para input de convidados (Step 2)
+const convidadosInputRef = ref<HTMLInputElement|null>(null)
+const convidadoSugestoes = [50, 100, 200, 500]
+
+// Persistência do passo atual do wizard
+const STEP_KEY = 'solicitacoes:new:step'
+onMounted(() => {
+  try {
+    const raw = localStorage.getItem(STEP_KEY)
+    const idx = raw ? parseInt(raw) : NaN
+    if (!Number.isNaN(idx) && idx >= 0) {
+      currentStep.value = idx
+    }
+  } catch {}
+  window.addEventListener('keydown', handleGlobalKeydown)
+})
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleGlobalKeydown)
+})
+watch(currentStep, (v) => {
+  try { localStorage.setItem(STEP_KEY, String(v)) } catch {}
+})
+
 // Configuração de escala (horas por turno) usada nos cálculos
 const escalaHoras = ref<number>(8)
+
+// Pausa 1h (Almoço) selecionada pelo usuário no Step 1
+const pausa1h = ref<boolean>(true)
+
+// Tipo de escala selecionado (hora/diaria/escala) vindo do DateRangePicker
+const tipoEscala = ref<'hora' | 'diaria' | 'escala' | null>(null)
+const labelTipoEscala = computed(() => {
+  return tipoEscala.value === 'hora' ? 'Hora trabalhada'
+    : tipoEscala.value === 'diaria' ? 'Diária'
+    : tipoEscala.value === 'escala' ? 'Escala/Plantão'
+    : '—'
+})
+
+// Atualiza o tipo de escala vindo do DateRangePicker (evita erro de template ao atribuir .value diretamente)
+function onUpdateTipoEscala(t: 'hora'|'diaria'|'escala') {
+  tipoEscala.value = t
+  try { (draft.value as any).tipo_escala = t } catch {}
+}
+
+// Atualiza a pausa 1h vinda do DateRangePicker e persiste no draft (para JSON debug e restauração)
+function onUpdatePausa(val: boolean){
+  pausa1h.value = !!val
+  try { (draft.value as any).pausa1h = !!val } catch {}
+}
+
+
+
+// KPIs de resumo para Step-5
+const totalDiasEvento = computed(() => (budgetSummary.value?.eventDates?.length ?? (draft.value.datas?.length ?? 0)))
+// Turnos efetivos (exclui pausas e marcações que não representam trabalho real)
+const turnosEfetivos = computed(() => (draft.value.turnos || []).filter(t => !t?.isPausa && !t?.isBreak && !t?.isExtraMarker))
+const totalTurnosEvento = computed(() => turnosEfetivos.value.length)
+const totalPeriodos = computed(() => (budgetSummary.value?.totals?.totalPeriods ?? 0))
+const modoEquipesLabel = computed(() => (modoEquipes.value === 'automatico' ? 'Automático' : 'Manual'))
 
 
 // Estado do card do nome do evento
 const eventoNomeCard = ref(false)
 const eventoNomeInput = ref('')
+// Flag indica se o usuário já confirmou o nome (Enter/Tab)
+const eventoNomeCommitted = ref(false)
 
-// Inicializa o card se já houver nome do evento
-if (draft.value.evento_nome) {
-  eventoNomeCard.value = true
-}
+
+// Garante que o texto digitado no campo seja refletido no draft (e persista)
+watch(eventoNomeInput, (v) => {
+  try {
+    draft.value.evento_nome = (v || '').toString()
+  } catch {}
+})
+
+
+// Sincroniza com restauração do draft somente se já estava confirmado anteriormente
+watch(() => draft.value.evento_nome, (v) => {
+  const val = (v ?? '').toString()
+  if (eventoNomeCommitted.value && val) {
+    eventoNomeInput.value = val
+    eventoNomeCard.value = true
+  } else if (!val) {
+    eventoNomeInput.value = ''
+    eventoNomeCard.value = false
+  } else if (!eventoNomeCommitted.value) {
+    // Usuário está digitando: manter input aberto
+    // Não alterar eventoNomeCard aqui
+  }
+}, { immediate: true })
+
 
 // Funções para gerenciar o card do nome do evento
 function criarEventoNomeCard() {
   console.log('🎯 criarEventoNomeCard chamada - valor:', eventoNomeInput.value)
   if (eventoNomeInput.value.trim()) {
     draft.value.evento_nome = eventoNomeInput.value.trim()
+    eventoNomeCommitted.value = true
     eventoNomeCard.value = true
-    eventoNomeInput.value = ''
     // Emite o evento para atualizar o título
     emit('evento-nome-changed', draft.value.evento_nome)
 
@@ -178,9 +287,11 @@ function handleEventoNomeEnter() {
 }
 
 function removerEventoNomeCard() {
+  // Volta para modo edição mantendo o valor atual no input para ajuste
   eventoNomeInput.value = draft.value.evento_nome
   eventoNomeCard.value = false
-  draft.value.evento_nome = ''
+  eventoNomeCommitted.value = false
+  // Não limpamos draft.evento_nome imediatamente: usuário pode apenas querer editar
 }
 
 function removerClienteCard() {
@@ -273,14 +384,22 @@ function focusField(fieldName: string) {
     }
 
     if (field) {
-      console.log(`✅ Focando no elemento:`, field)
-      field.focus()
+      // Se o elemento encontrado não é um input foco, procura um input interno
+      let target = field as HTMLElement
+      const tag = (field.tagName || '').toLowerCase()
+      if (!['input', 'select', 'textarea'].includes(tag) && !field.hasAttribute('contenteditable')) {
+        const inner = field.querySelector('input, textarea, select, [role="combobox"], button, [tabindex]:not([tabindex="-1"])') as HTMLElement | null
+        if (inner) target = inner
+      }
 
-      // Para campos de seleção, simula clique para abrir
+      console.log(`✅ Focando no elemento:`, target)
+      target.focus()
+
+      // Para campos de seleção, simula clique no elemento focável (não no ícone)
       if (fieldName === 'cliente' || fieldName === 'local') {
         setTimeout(() => {
           console.log(`🖱️ Simulando clique no campo ${fieldName}`)
-          field.click()
+          target.click()
         }, 150)
       }
     } else {
@@ -295,39 +414,93 @@ const wizardSteps = computed(() => [
     id: 'basic',
     title: 'Informações Básicas',
     description: 'Nome, cliente, local e data',
-    icon: '📝',
+    icon: 'document',
     isValid: !!(draft.value.evento_nome && draft.value.cliente_nome && draft.value.venue.nome && draft.value.datas.length > 0)
   },
   {
     id: 'planning',
     title: 'Planejamento',
     description: 'Segmento e público',
-    icon: '🎯',
+    icon: 'list',
     isValid: !!(draft.value.segmento && draft.value.publico.convidados_estimados > 0)
   },
   {
     id: 'services',
     title: 'Serviços Necessários',
     description: 'Que tipo de serviços seu evento vai precisar?',
-    icon: '🎯',
-    isOptional: true,
+    icon: 'config',
     isValid: true
   },
   {
     id: 'team',
     title: 'Catálogo & Orçamento',
     description: 'Catálogo inteligente de equipes e orçamento',
-    icon: '📚',
+    icon: 'user',
     isValid: true
   },
   {
     id: 'final',
     title: 'Revisão & Finalização',
     description: 'Conferir dados e observações',
-    icon: '✅',
+    icon: 'check',
     isValid: true
   }
 ])
+
+// JSON Debug (agrega dados de todos os steps)
+const jsonDebug = computed(() => {
+  try {
+    return deepClone({
+      resumoOperacao: resumoOperacao.value,
+      servicosSelecionados: servicosSelecionados.value,
+      funcoesPlanejadas: funcoesPlanejadas.value,
+      // Estado visual do Step 1 importante para recomposi e7 e3o ao voltar
+      tipoEscala: tipoEscala.value,
+      escalaHoras: escalaHoras.value,
+      pausa1h: pausa1h.value,
+      draft: draft.value,
+      budgetSummary: budgetSummary.value,
+      // Novos campos de métricas de turnos
+      total_turnos_diario: turnosEfetivos.value.length,
+      total_turnos_periodo: (draft.value.datas?.length || 0) * turnosEfetivos.value.length,
+    })
+  } catch {
+    return { erro: 'Falha ao montar JSON de debug' }
+  }
+})
+
+const jsonDebugPretty = computed(() => {
+  try { return JSON.stringify(jsonDebug.value, null, 2) } catch { return '' }
+})
+
+async function copyJsonDebug() {
+  try {
+    await navigator.clipboard.writeText(jsonDebugPretty.value)
+    console.log('JSON Debug copiado para a área de transferência')
+  } catch (e) {
+    console.warn('Falha ao copiar JSON Debug', e)
+  }
+}
+
+// Ref para o CastingBuilder (Step 4) e resumo de orçamento
+const castingRef = ref<any>(null)
+const budgetSummary = ref<any>(null)
+function refreshBudgetSummary(){
+  try { budgetSummary.value = castingRef.value?.getBudgetSummary?.() || null } catch {}
+}
+
+function money(n: number){
+  try { return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(n||0)) } catch { return `${n}` }
+}
+
+function itemSubtotalFromSummary(line: any){
+  try { return (line?.assignments||[]).reduce((acc:number,a:any)=> acc + (Number(a?.qty)||0)*(Number(a?.price)||0), 0) } catch { return 0 }
+}
+function itemQtyFromSummary(line: any){
+  try { return (line?.assignments||[]).filter((a:any)=>!a?.isExtra).reduce((acc:number,a:any)=> acc + (Number(a?.qty)||0), 0) } catch { return 0 }
+}
+
+
 
 // Client selection
 const selectedClient = computed({
@@ -361,11 +534,14 @@ const selectedVenue = computed({
 
 // Templates removidos conforme solicitado
 
-// Categorias de serviços (carregadas de /settings)
+// Categorias de serviços vindas do store (mantém ref local para compatibilidade com restante do código)
 const categoriasServicos = ref<any[]>([])
-
-// Serviços selecionados pelo usuário
+// Serviços selecionados pelo usuário (precisa existir antes do watch que chama sincronizarServicos)
 const servicosSelecionados = ref<string[]>([])
+watch(configCategorias, (val) => {
+  categoriasServicos.value = Array.isArray(val) ? val : []
+  sincronizarServicos()
+}, { immediate: true })
 
 // Função para adicionar/remover serviço
 function toggleServico(servicoNome: string) {
@@ -401,10 +577,7 @@ function toggleCategoriaPrincipal(id: string){
   if (idx > -1) draft.value.servicos_principais.splice(idx, 1)
   else draft.value.servicos_principais.push(id)
 }
-
-
-  // Sincroniza com os dados do draft
-  sincronizarServicos()
+// (chamada inicial removida; já é coberta pelo watch com immediate:true)
 
 // Função para sincronizar serviços selecionados com o draft
 function sincronizarServicos() {
@@ -412,19 +585,7 @@ function sincronizarServicos() {
   const byId = (id: string) => cats.find((c: any) => c.id === id)
 
 
-onMounted(async () => {
-  try {
-    const resp = await getAdminConfig(new URLSearchParams())
-    const cfg = (resp as any)?.data || resp || {}
-    const segs = Array.isArray(cfg.segmentos_evento) && cfg.segmentos_evento.length ? cfg.segmentos_evento : FALLBACK_SEGMENTOS
-    const cats = Array.isArray(cfg.categorias_servicos) && cfg.categorias_servicos.length ? cfg.categorias_servicos : FALLBACK_CATEGORIAS
-    segmentosEvento.value = segs
-    categoriasServicos.value = cats
-  } catch {
-    segmentosEvento.value = FALLBACK_SEGMENTOS
-    categoriasServicos.value = FALLBACK_CATEGORIAS
-  }
-})
+// onMounted anterior removido (carregamento agora centralizado via useAppConfig)
 
   // Alimentação
   const catAlim = byId('alimentacao')
@@ -528,33 +689,40 @@ const sugestoesFuncoes = computed<SugestaoFuncao[]>(() => {
     if (q > 0) s.push({ setor, funcao, quantidade: q })
   }
 
+  const mult = multiplicadores.value || {}
+  function multVal(catId: string, funcao: string, fallback: number){
+    const entry = mult[catId]
+    if (!entry) return fallback
+    const raw = entry[funcao]
+    return raw ? Number(raw) || fallback : fallback
+  }
   if (selecionadas.includes('alimentacao')) {
-    add('Alimentação & Bebidas', 'Garçom', convidados / 30)
-    add('Alimentação & Bebidas', 'Copeiro', convidados / 80)
+    add('Alimentação & Bebidas', 'Garçom', convidados / multVal('alimentacao','Garçom',30))
+    add('Alimentação & Bebidas', 'Copeiro', convidados / multVal('alimentacao','Copeiro',80))
   }
   if (selecionadas.includes('estacionamento')) {
-    add('Estacionamento & Valet', 'Manobrista', convidados / 50)
-    add('Estacionamento & Valet', 'Coordenador de Estacionamento', convidados > 0 ? Math.max(1, convidados / 300) : 0)
+    add('Estacionamento & Valet', 'Manobrista', convidados / multVal('estacionamento','Manobrista',50))
+    add('Estacionamento & Valet', 'Coordenador de Estacionamento', convidados > 0 ? Math.max(1, convidados / multVal('estacionamento','Coordenador de Estacionamento',300)) : 0)
   }
   if (selecionadas.includes('traducao')) {
     add('Tradução & Interpretação', 'Intérprete', Math.max(1, turnosCount))
     add('Tradução & Interpretação', 'Técnico de Tradução', turnosCount > 1 ? 1 : 0)
   }
   if (selecionadas.includes('seguranca')) {
-    add('Segurança & Saúde', 'Segurança', convidados / 150)
-    add('Segurança & Saúde', 'Brigadista', convidados / 500)
+    add('Segurança & Saúde', 'Segurança', convidados / multVal('seguranca','Segurança',150))
+    add('Segurança & Saúde', 'Brigadista', convidados / multVal('seguranca','Brigadista',500))
   }
   if (selecionadas.includes('recepcao')) {
-    add('Recepção & Credenciamento', 'Recepcionista', convidados / 120)
-    add('Recepção & Credenciamento', 'Operador de Credenciamento', convidados / 200)
+    add('Recepção & Credenciamento', 'Recepcionista', convidados / multVal('recepcao','Recepcionista',120))
+    add('Recepção & Credenciamento', 'Operador de Credenciamento', convidados / multVal('recepcao','Operador de Credenciamento',200))
   }
   if (selecionadas.includes('limpeza')) {
-    add('Limpeza & Manutenção', 'Auxiliar de Limpeza', convidados / 200)
+    add('Limpeza & Manutenção', 'Auxiliar de Limpeza', convidados / multVal('limpeza','Auxiliar de Limpeza',200))
     add('Limpeza & Manutenção', 'Supervisor de Limpeza', convidados > 300 ? 1 : 0)
   }
   if (selecionadas.includes('logistica')) {
-    add('Logística & Transporte', 'Carregador', convidados / 300)
-    add('Logística & Transporte', 'Motorista', convidados / 400)
+    add('Logística & Transporte', 'Carregador', convidados / multVal('logistica','Carregador',300))
+    add('Logística & Transporte', 'Motorista', convidados / multVal('logistica','Motorista',400))
     add('Logística & Transporte', 'Coordenador de Transporte', convidados > 0 ? 1 : 0)
   }
 
@@ -562,43 +730,183 @@ const sugestoesFuncoes = computed<SugestaoFuncao[]>(() => {
 })
 
 function getSetorIcon(setor: string): string {
-  switch (setor) {
-    case 'Alimentação & Bebidas': return '🍽️'
-    case 'Estacionamento & Valet': return '🚗'
-    case 'Tradução & Interpretação': return '🎧'
-    case 'Segurança & Saúde': return '🛡️'
-    case 'Recepção & Credenciamento': return '🎫'
-    case 'Limpeza & Manutenção': return '🧹'
-    case 'Logística & Transporte': return '🚚'
-    default: return '🧩'
-  }
+  const map = setorIcons.value || {}
+  return map[setor] || '🧩'
 }
 
 
 
 // Estado editável das funções sugeridas no Step 3
 const funcoesPlanejadas = ref<SugestaoFuncao[]>([])
+// Controle de hash e modificações manuais
+let lastAutoHash = ''
+let userModificouFuncoes = false
+function buildAutoHash(): string {
+  const base = {
+    convidados: Number(draft.value.publico?.convidados_estimados || 0),
+    servicos: [...(draft.value.servicos_principais || [])].sort(),
+    turnos: (draft.value.turnos || []).length,
+    modo: modoEquipes.value,
+  }
+  try { return btoa(unescape(encodeURIComponent(JSON.stringify(base)))) } catch { return JSON.stringify(base) }
+}
 const showAddFunc = ref(false)
 const addFilterId = ref<string>('all')
 const addSearch = ref<string>('')
 const showFilterMenu = ref(false)
 
 
+
+// Persistência de estado do Wizard (modo, escala, tipo, pausa, funções)
+const WIZARD_STATE_KEY = 'solicitacoes:new:wizard:v1'
+function persistWizardStateDebounced(){
+  try {
+    clearTimeout((persistWizardStateDebounced as any)._t)
+  } catch {}
+  ;(persistWizardStateDebounced as any)._t = setTimeout(() => {
+    try {
+      const payload = {
+        modoEquipes: modoEquipes.value,
+        tipoEscala: tipoEscala.value,
+        escalaHoras: escalaHoras.value,
+        pausa1h: pausa1h.value,
+        estrategiaTurnos: draft.value.estrategia_turnos,
+        turnos: Array.isArray(draft.value.turnos) ? draft.value.turnos : [],
+        resumoOperacao: resumoOperacao.value,
+        funcoesPlanejadas: funcoesPlanejadas.value,
+        eventoNome: draft.value.evento_nome || '',
+        eventoNomeCommitted: eventoNomeCommitted.value,
+        cliente: draft.value.cliente_id ? { id: draft.value.cliente_id, nome: draft.value.cliente_nome } : null,
+        venue: draft.value.venue && draft.value.venue.id ? draft.value.venue : null,
+        datas: Array.isArray(draft.value.datas) ? draft.value.datas : [],
+        segmento: draft.value.segmento || '',
+        servicosPrincipais: Array.isArray(draft.value.servicos_principais) ? draft.value.servicos_principais : [],
+        convidados: Number(draft.value.publico?.convidados_estimados || 0),
+      }
+      localStorage.setItem(WIZARD_STATE_KEY, JSON.stringify(payload))
+    } catch {}
+  }, 200)
+}
+
+onMounted(() => {
+  try {
+    const raw = localStorage.getItem(WIZARD_STATE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object') {
+        if (parsed.modoEquipes === 'automatico' || parsed.modoEquipes === 'manual') {
+          modoEquipes.value = parsed.modoEquipes
+        }
+        if (parsed.tipoEscala === 'hora' || parsed.tipoEscala === 'diaria' || parsed.tipoEscala === 'escala' || parsed.tipoEscala === null) {
+          tipoEscala.value = parsed.tipoEscala
+        }
+        if (typeof parsed.escalaHoras === 'number' && parsed.escalaHoras >= 4) {
+          escalaHoras.value = parsed.escalaHoras
+        }
+        if (typeof parsed.pausa1h === 'boolean') {
+          pausa1h.value = parsed.pausa1h
+        }
+        if (typeof parsed.estrategiaTurnos === 'boolean') {
+          draft.value.estrategia_turnos = parsed.estrategiaTurnos
+        }
+        if (Array.isArray(parsed.turnos)) {
+          draft.value.turnos = parsed.turnos.filter((t:any) => t && typeof t.inicio === 'string' && typeof t.fim === 'string')
+        }
+        if (parsed.resumoOperacao && typeof parsed.resumoOperacao === 'object') {
+          resumoOperacao.value = parsed.resumoOperacao
+        }
+        if (Array.isArray(parsed.funcoesPlanejadas)) {
+          funcoesPlanejadas.value = parsed.funcoesPlanejadas
+        }
+        if (typeof parsed.eventoNome === 'string' && parsed.eventoNome.trim()) {
+          draft.value.evento_nome = parsed.eventoNome
+          eventoNomeInput.value = parsed.eventoNome
+          if (parsed.eventoNomeCommitted) {
+            eventoNomeCommitted.value = true
+            eventoNomeCard.value = true
+            try { emit('evento-nome-changed', draft.value.evento_nome) } catch {}
+          }
+        }
+        if (parsed.cliente && typeof parsed.cliente === 'object' && parsed.cliente.id) {
+          draft.value.cliente_id = parsed.cliente.id
+          draft.value.cliente_nome = parsed.cliente.nome
+        }
+        if (parsed.venue && typeof parsed.venue === 'object' && parsed.venue.id) {
+          draft.value.venue = {
+            id: parsed.venue.id || '',
+            nome: parsed.venue.nome || '',
+            endereco: parsed.venue.endereco || '',
+            maps_url: parsed.venue.maps_url || ''
+          }
+        }
+        if (Array.isArray(parsed.datas) && parsed.datas.length) {
+          draft.value.datas = parsed.datas.filter((d: any) => typeof d === 'string')
+        }
+        if (typeof parsed.segmento === 'string' && parsed.segmento) {
+          draft.value.segmento = parsed.segmento
+        }
+        if (Array.isArray(parsed.servicosPrincipais)) {
+          draft.value.servicos_principais = parsed.servicosPrincipais.filter((s: any) => typeof s === 'string')
+        }
+        if (typeof parsed.convidados === 'number' && parsed.convidados >= 0) {
+          draft.value.publico.convidados_estimados = parsed.convidados
+        }
+
+        // Após restaurar dados base, se modo automático e nenhuma função carregada, gerar sugestões iniciais
+        nextTick(() => {
+          if (modoEquipes.value === 'automatico' && funcoesPlanejadas.value.length === 0) {
+            const autoHash = buildAutoHash()
+            resetSugestoes()
+            lastAutoHash = autoHash
+          }
+        })
+      }
+    }
+  } catch {}
+})
+
+watch([
+  modoEquipes,
+  tipoEscala,
+  escalaHoras,
+  pausa1h,
+  () => draft.value.turnos,
+  () => draft.value.estrategia_turnos,
+  resumoOperacao,
+  funcoesPlanejadas,
+  () => draft.value.evento_nome,
+  eventoNomeCommitted,
+  () => draft.value.cliente_id,
+  () => draft.value.cliente_nome,
+  () => draft.value.venue?.id,
+  () => draft.value.venue?.nome,
+  () => draft.value.datas,
+  () => draft.value.segmento,
+  () => draft.value.servicos_principais,
+  () => draft.value.publico.convidados_estimados,
+], persistWizardStateDebounced, { deep: true })
+
 const funcoesCatalogo = computed(() => {
   const src = categoriasServicos.value || []
-  const cats = addFilterId.value === 'all' ? src : src.filter((c: any) => c.id === addFilterId.value)
-  const list: Array<{ setor: string; funcao: string }> = []
-  cats.forEach((c: any) => {
-    const seen: Record<string, boolean> = {}
-    ;(c.servicos || []).forEach((serv: any) => {
-      (serv.funcoes || []).forEach((fn: string) => {
-        if (!seen[fn]) {
-          seen[fn] = true
-          list.push({ setor: c.nome, funcao: fn })
-        }
+  let list: Array<{ setor: string; funcao: string }> = []
+  if (src.length > 0) {
+    const cats = addFilterId.value === 'all' ? src : src.filter((c: any) => c.id === addFilterId.value)
+    cats.forEach((c: any) => {
+      const seen: Record<string, boolean> = {}
+      ;(c.servicos || []).forEach((serv: any) => {
+        (serv.funcoes || []).forEach((fn: string) => {
+          if (!seen[fn]) {
+            seen[fn] = true
+            list.push({ setor: c.nome, funcao: fn })
+          }
+        })
       })
     })
-  })
+  } else {
+    // Fallback: derivar de catalog_roles (setor/label)
+    const roles = catalogRoles.value || []
+    list = roles.map((r: any) => ({ setor: r.sector || r.setor || '—', funcao: r.label || r.nome || r.key }))
+  }
   const q = (addSearch.value || '').toLowerCase()
   return q ? list.filter(it => it.funcao.toLowerCase().includes(q) || it.setor.toLowerCase().includes(q)) : list
 })
@@ -610,6 +918,18 @@ function addFuncFromCatalog(setor: string, funcao: string) {
   } else {
     funcoesPlanejadas.value.push({ setor, funcao, quantidade: 1 })
   }
+  userModificouFuncoes = true
+}
+
+function toggleFuncFromCatalog(setor: string, funcao: string) {
+  const idx = funcoesPlanejadas.value.findIndex(f => f.setor === setor && f.funcao === funcao)
+  if (idx >= 0) {
+    // Remover função inteira
+    funcoesPlanejadas.value.splice(idx, 1)
+  } else {
+    funcoesPlanejadas.value.push({ setor, funcao, quantidade: 1 })
+  }
+  userModificouFuncoes = true
 }
 
 
@@ -617,6 +937,7 @@ const totalFuncoes = computed(() => funcoesPlanejadas.value.reduce((acc, f) => a
 
 function resetSugestoes() {
   funcoesPlanejadas.value = sugestoesFuncoes.value.map(x => ({ ...x }))
+  userModificouFuncoes = false
 }
 
 watch(modoEquipes, v => {
@@ -625,6 +946,7 @@ watch(modoEquipes, v => {
   } else {
     // Ao entrar no modo Manual, limpar para começar do zero
     clearFuncoes()
+    userModificouFuncoes = true
   }
 })
 
@@ -632,9 +954,23 @@ watch(modoEquipes, v => {
 watch(currentStep, () => {
   const stepObj = wizardSteps.value[currentStep.value]
   if (!stepObj) return
+  if (stepObj.id === 'planning') {
+    // Focar automaticamente no input de convidados ao entrar no Step 2
+    nextTick(() => { try { convidadosInputRef.value?.focus() } catch {} })
+  }
   if (stepObj.id === 'services') {
     if (modoEquipes.value === 'automatico') {
-      if (funcoesPlanejadas.value.length === 0) resetSugestoes()
+      const newHash = buildAutoHash()
+      const baseMudou = lastAutoHash && lastAutoHash !== newHash
+      if (funcoesPlanejadas.value.length === 0) {
+        resetSugestoes(); lastAutoHash = newHash
+      } else if (baseMudou && !userModificouFuncoes) {
+        // Dados base mudaram (convidados/serviços/turnos) e usuário não alterou manualmente -> regenerar
+        resetSugestoes(); lastAutoHash = newHash
+      } else if (!lastAutoHash) {
+        // Primeira entrada
+        lastAutoHash = newHash
+      }
     } else {
       clearFuncoes()
     }
@@ -651,17 +987,22 @@ watch(currentStep, () => {
     } catch (e) {
       console.log('[Wizard] Step 4 (team) data', { datas: draft.value.datas, turnos: draft.value.turnos, servicos_principais: draft.value.servicos_principais, funcoesPlanejadas: funcoesPlanejadas.value, equipes: draft.value.equipes })
     }
+    refreshBudgetSummary()
+  } else if (stepObj.id === 'final') {
+    refreshBudgetSummary()
   }
 })
 
-function incFuncao(i: number) { funcoesPlanejadas.value[i].quantidade++ }
-function decFuncao(i: number) { funcoesPlanejadas.value[i].quantidade = Math.max(0, (funcoesPlanejadas.value[i].quantidade || 0) - 1) }
-function removeFuncao(i: number) { funcoesPlanejadas.value.splice(i, 1) }
-function clearFuncoes() { funcoesPlanejadas.value = [] }
+function incFuncao(i: number) { funcoesPlanejadas.value[i].quantidade++; userModificouFuncoes = true }
+function decFuncao(i: number) { funcoesPlanejadas.value[i].quantidade = Math.max(0, (funcoesPlanejadas.value[i].quantidade || 0) - 1); userModificouFuncoes = true }
+function removeFuncao(i: number) { funcoesPlanejadas.value.splice(i, 1); userModificouFuncoes = true }
+function clearFuncoes() { funcoesPlanejadas.value = []; userModificouFuncoes = true }
 
 
 function onWizardComplete() {
-  emit('update:modelValue', deepClone(draft.value))
+  const payload = deepClone(draft.value)
+  emit('update:modelValue', payload)
+  emit('complete', payload)
 }
 
 // Funções para cálculo de horas dos turnos
@@ -696,6 +1037,9 @@ function calculateTotalByTypeWithWeekends(turnos: Turno[], datas: string[]): {
     const analysis = analyzeTurnoHours(turno.inicio, turno.fim, false)
     return {
       normais: acc.normais + analysis.normais,
+
+  // (duplicated buildAutoHash removido aqui - versão oficial definida anteriormente)
+
       noturnas: acc.noturnas + analysis.noturnas,
       normaisExtras: acc.normaisExtras + analysis.normaisExtras,
       noturnaExtras: acc.noturnaExtras + analysis.noturnaExtras,
@@ -888,8 +1232,9 @@ function gerarTurnosOtimizados(inicioStr: string, fimStr: string, estrategia: bo
   const duracaoTotal = fimMinutos - inicioMinutos
   const duracaoHoras = duracaoTotal / 60
 
-  // Para períodos ≥8h, a pausa JÁ está incluída no período informado
-  const temPausaObrigatoria = duracaoHoras >= 8
+  // Pausa de 1h só se o usuário selecionou "1 Hora de Almoço"
+  // Mesmo que o período seja ≥8h, se "Hora Extra" estiver selecionado, não aplica pausa.
+  const temPausaObrigatoria = (duracaoHoras >= 8) && (pausa1h.value === true)
   const duracaoTrabalho = temPausaObrigatoria ? duracaoTotal - 60 : duracaoTotal
 
   console.log(`📊 Período: ${duracaoHoras}h corridas`)
@@ -935,11 +1280,27 @@ function gerarTurnosOtimizados(inicioStr: string, fimStr: string, estrategia: bo
       const fimTurno = cur + turnoMinutos
 
       const startHour = Math.floor((cur % (24*60)) / 60)
+      // Usa faixas configuráveis do appConfig (regras_turnos.faixas) se disponíveis
       let nome = 'Turno'
-      if (startHour >= 6 && startHour < 12) nome = 'Turno Manhã'
-      else if (startHour >= 12 && startHour < 18) nome = 'Turno Tarde'
-      else if (startHour >= 18 && startHour < 24) nome = 'Turno Noite'
-      else nome = 'Turno Madrugada'
+      try {
+        const cfg = useAppConfig()
+        const faixas = (cfg as any)?.regras_turnos?.faixas
+        if (Array.isArray(faixas) && faixas.length) {
+          const faixaEncontrada = faixas.find((f: any) => typeof f?.inicio === 'number' && typeof f?.fim === 'number' && startHour >= f.inicio && startHour < f.fim)
+          if (faixaEncontrada?.nome) nome = faixaEncontrada.nome
+        } else {
+          // fallback legacy
+          if (startHour >= 6 && startHour < 12) nome = 'Turno Manhã'
+          else if (startHour >= 12 && startHour < 18) nome = 'Turno Tarde'
+          else if (startHour >= 18 && startHour < 24) nome = 'Turno Noite'
+          else nome = 'Turno Madrugada'
+        }
+      } catch {
+        if (startHour >= 6 && startHour < 12) nome = 'Turno Manhã'
+        else if (startHour >= 12 && startHour < 18) nome = 'Turno Tarde'
+        else if (startHour >= 18 && startHour < 24) nome = 'Turno Noite'
+        else nome = 'Turno Madrugada'
+      }
 
       // Se há múltiplos turnos, adicionar número
       const numTurnosEstimado = Math.ceil(duracaoTrabalho / escalaMin)
@@ -989,6 +1350,8 @@ function onTurnosDetected(turnos: Turno[]) {
   if (draft.value.estrategia_turnos === undefined) {
     draft.value.estrategia_turnos = true
   }
+  // Persistir imediatamente após detectar
+  try { persistWizardStateDebounced() } catch {}
 }
 
 // Flag para evitar loops de recálculo
@@ -1025,12 +1388,15 @@ function onToggleEstrategia() {
 // Altera escala a partir do DateRangePicker/TurnosDetectados e recalcula
 function onAlterarEscala(horas: number){
   escalaHoras.value = Math.max(4, horas)
+  try { (draft.value as any).escala_horas = escalaHoras.value } catch {}
   recalcularTurnos()
 }
 
 </script>
 
 <template>
+  <div v-if="configLoading" class="p-6 border rounded-lg bg-white mb-4 text-sm text-slate-600">Carregando configurações...</div>
+  <div v-else-if="configError" class="p-6 border rounded-lg bg-red-50 mb-4 text-sm text-red-700">Falha ao carregar configurações. Recarregue a página.</div>
   <FormWizard
     v-model="currentStep"
     :steps="wizardSteps"
@@ -1042,7 +1408,7 @@ function onAlterarEscala(horas: number){
         <!-- Basic Form Fields -->
         <div class="space-y-6">
           <!-- Informações do Evento -->
-          <div class="card p-6 mb-6">
+          <div class="card p-6 mb-6 border border-gray-200">
             <h3 class="text-lg font-semibold text-gray-900 mb-4">Informações do Evento</h3>
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div class="form-group">
@@ -1050,7 +1416,6 @@ function onAlterarEscala(horas: number){
               <input
                 v-if="!eventoNomeCard"
                 v-model="eventoNomeInput"
-
                 @keydown.enter.prevent="handleEventoNomeEnter"
                 @keydown.tab.prevent="criarEventoNomeCard"
                 @keydown="handleKeyNavigation"
@@ -1062,7 +1427,7 @@ function onAlterarEscala(horas: number){
               <!-- Card do Nome do Evento -->
               <div v-else class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
                 <div class="flex-1">
-                  <div class="font-medium text-blue-900">{{ draft.evento_nome }}</div>
+                  <div class="font-medium text-blue-900">{{ eventoNomeInput }}</div>
                   <div class="text-xs text-blue-600">Nome do evento</div>
                 </div>
                 <button
@@ -1090,15 +1455,15 @@ function onAlterarEscala(horas: number){
                 required
               />
               <!-- Card do Cliente -->
-              <div v-else class="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg">
+              <div v-else class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
                 <div class="flex-1">
-                  <div class="font-medium text-green-900">{{ draft.cliente_nome }}</div>
-                  <div class="text-xs text-green-600">Cliente selecionado</div>
+                  <div class="font-medium text-blue-900">{{ draft.cliente_nome }}</div>
+                  <div class="text-xs text-blue-600">Cliente selecionado</div>
                 </div>
                 <button
                   type="button"
                   @click="removerClienteCard"
-                  class="text-green-600 hover:text-green-800 p-1 rounded hover:bg-green-100"
+                  class="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-100"
                   title="Alterar cliente"
                   tabindex="-1"
                 >
@@ -1114,22 +1479,22 @@ function onAlterarEscala(horas: number){
               <VenueSelector
                 v-if="!selectedVenue"
                 v-model="selectedVenue"
-                :client-id="draft.cliente_id"
+                :client-id="draft.cliente_id ? String(draft.cliente_id) : null"
                 @keydown="handleKeyNavigation"
                 data-field="local"
                 class="venue-selector"
                 required
               />
               <!-- Card do Local -->
-              <div v-else class="flex items-center gap-2 p-3 bg-purple-50 border border-purple-200 rounded-lg">
+              <div v-else class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
                 <div class="flex-1">
-                  <div class="font-medium text-purple-900">{{ draft.venue.nome }}</div>
-                  <div class="text-xs text-purple-600">Local selecionado</div>
+                  <div class="font-medium text-blue-900">{{ draft.venue.nome }}</div>
+                  <div class="text-xs text-blue-600">Local selecionado</div>
                 </div>
                 <button
                   type="button"
                   @click="removerLocalCard"
-                  class="text-purple-600 hover:text-purple-800 p-1 rounded hover:bg-purple-100"
+                  class="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-100"
                   title="Alterar local"
                   tabindex="-1"
                 >
@@ -1147,9 +1512,14 @@ function onAlterarEscala(horas: number){
             v-model="draft.datas"
             :current-turnos="draft.turnos"
             :estrategia-turnos="draft.estrategia_turnos"
+            :escala="(escalaHoras as any)"
+            :tipo-escala="(tipoEscala ?? undefined)"
+            :pausa1h="pausa1h"
             @turnos-detected="onTurnosDetected"
             @recalcular-turnos="onToggleEstrategia"
             @alterar-escala="onAlterarEscala"
+            @update:tipoEscala="onUpdateTipoEscala"
+            @update:pausa1h="onUpdatePausa"
             @resumo-operacao="onResumoOperacao"
             @clear-all="draft.turnos = []; draft.turnos_detectados = false"
           />
@@ -1161,47 +1531,37 @@ function onAlterarEscala(horas: number){
       <!-- Step 2: Planning -->
       <div v-if="step.id === 'planning'" class="space-y-6">
         <!-- Grid de 3 colunas: 20% + 40% + 40% -->
-        <div class="grid grid-cols-5 gap-6">
+        <div class="grid grid-cols-5 gap-6 ">
           <!-- Coluna 1: Número de Convidados (20% = 1/5) -->
           <div class="col-span-1">
-            <div class="card p-6">
-              <h3 class="text-lg font-semibold text-gray-900 mb-4">Convidados</h3>
-
-              <!-- Display atual -->
-              <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
-                <div class="flex flex-col items-center gap-2">
-                  <div class="text-2xl">👥</div>
-                  <div class="text-center">
-                    <div class="text-xl font-bold text-blue-900">
-                      {{ draft.publico.convidados_estimados || 0 }}
-                    </div>
-                    <div class="text-xs text-blue-700">esperados</div>
-                  </div>
+            <div class="card p-5">
+              <h3 class="text-lg font-semibold text-gray-900 mb-3">Convidados</h3>
+              <div class="bg-blue-50/70 border border-blue-200 rounded-xl px-4 py-5 flex flex-col items-center gap-3 relative overflow-hidden">
+                <div class="absolute inset-0 pointer-events-none rounded-xl" style="background: radial-gradient(circle at 70% 30%, rgba(59,130,246,0.15), transparent 70%);"></div>
+                <div class="text-3xl leading-none">👥</div>
+                <div class="w-full text-center">
+                  <input
+                    ref="convidadosInputRef"
+                    v-model.number="draft.publico.convidados_estimados"
+                    type="number"
+                    min="1"
+                    max="10000"
+                    placeholder="0"
+                    class="w-full bg-transparent text-center text-3xl font-extrabold tracking-tight text-blue-900 focus:outline-none focus:ring-0 border-0 p-0 m-0 appearance-none [field-sizing:content]"
+                  />
+                  <div class="mt-1 text-[11px] uppercase tracking-wide font-medium text-blue-700">aprox.</div>
                 </div>
-              </div>
-
-              <!-- Input -->
-              <div class="space-y-3">
-                <input
-                  v-model.number="draft.publico.convidados_estimados"
-                  type="number"
-                  min="1"
-                  max="10000"
-                  class="input text-center font-semibold"
-                  placeholder="150"
-                />
-
-                <!-- Botões rápidos -->
-                <div class="grid grid-cols-2 gap-1">
+                <div class="w-full grid grid-cols-2 gap-2 mt-2">
                   <button
-                    v-for="size in [50, 100, 200, 500]"
-                    :key="size"
+                    v-for="size in convidadoSugestoes"
+                    :key="'sug-'+size"
                     type="button"
                     @click="draft.publico.convidados_estimados = size"
-                    class="btn-secondary text-xs py-1"
-                    :class="{ 'btn-primary': draft.publico.convidados_estimados === size }"
+                    class="group relative p-2.5 border-2 rounded-lg bg-white/70 backdrop-blur-sm flex flex-col items-center justify-center gap-1 transition-all text-[11px] font-medium"
+                    :class="draft.publico.convidados_estimados === size ? 'border-blue-400 bg-blue-50 shadow-sm' : 'border-blue-100 hover:border-blue-300 hover:bg-white'"
                   >
-                    {{ size }}
+                    <span class="text-base leading-none">👥</span>
+                    <span>{{ size }}</span>
                   </button>
                 </div>
               </div>
@@ -1439,23 +1799,40 @@ function onAlterarEscala(horas: number){
                 </div>
 
                 <div class="grid grid-cols-1 gap-2">
-                  <div
-                    v-for="item in funcoesCatalogo"
-                    :key="item.setor + '|' + item.funcao"
-                    class="border rounded p-3 flex items-center justify-between hover:bg-gray-50 cursor-pointer"
-                    @click="addFuncFromCatalog(item.setor, item.funcao)"
-                  >
-                    <div class="flex items-center gap-3 min-w-0">
-                      <div class="text-xl w-8 text-center">{{ getSetorIcon(item.setor) }}</div>
-                      <div class="min-w-0">
-                        <div class="text-sm font-medium text-gray-900">{{ item.funcao }}</div>
-                        <div class="text-xs text-gray-500">{{ item.setor }}</div>
+                  <div v-if="configLoading" class="text-xs text-slate-500 py-4">Carregando catálogo...</div>
+                  <template v-else>
+                    <div
+                      v-for="item in funcoesCatalogo"
+                      :key="item.setor + '|' + item.funcao"
+                      class="border rounded p-3 flex items-center justify-between cursor-pointer transition-colors"
+                      :class="funcoesPlanejadas.some(f => f.setor===item.setor && f.funcao===item.funcao) ? 'bg-blue-50 border-blue-400 hover:bg-blue-100' : 'hover:bg-gray-50'"
+                      @click="toggleFuncFromCatalog(item.setor, item.funcao)"
+                    >
+                      <div class="flex items-center gap-3 min-w-0">
+                        <div class="text-xl w-8 text-center">{{ getSetorIcon(item.setor) }}</div>
+                        <div class="min-w-0">
+                          <div class="text-sm font-medium text-gray-900">{{ item.funcao }}</div>
+                          <div class="text-xs text-gray-500">{{ item.setor }}</div>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        class="p-1 rounded transition-colors"
+                        :class="funcoesPlanejadas.some(f => f.setor===item.setor && f.funcao===item.funcao) ? 'text-red-600 hover:text-red-800 hover:bg-red-100' : 'text-blue-600 hover:text-blue-800 hover:bg-blue-100'"
+                        @click.stop="toggleFuncFromCatalog(item.setor, item.funcao)"
+                        :title="funcoesPlanejadas.some(f => f.setor===item.setor && f.funcao===item.funcao) ? 'Remover' : 'Adicionar'"
+                      >
+                        <svg v-if="!funcoesPlanejadas.some(f => f.setor===item.setor && f.funcao===item.funcao)" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v14M5 12h14"/></svg>
+                        <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14"/></svg>
+                      </button>
+                    </div>
+                    <div v-if="!configLoading && funcoesCatalogo.length === 0" class="p-3 border rounded bg-amber-50 text-amber-800 text-xs space-y-2">
+                      <div><strong>Catálogo vazio.</strong> Configure categorias/serviços em Configurações e salve.</div>
+                      <div class="flex gap-2">
+                        <button type="button" class="px-2 py-1 rounded border border-amber-300 bg-white text-amber-700 hover:bg-amber-100" @click="ensureLoaded(true)">Recarregar</button>
                       </div>
                     </div>
-                    <button type="button" class="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-100" @click.stop="addFuncFromCatalog(item.setor, item.funcao)" title="Adicionar">
-                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v14M5 12h14"/></svg>
-                    </button>
-                  </div>
+                  </template>
                 </div>
               </div>
             </div>
@@ -1527,8 +1904,14 @@ function onAlterarEscala(horas: number){
           <div class="flex items-center justify-between mb-4">
             <div class="text-sm text-gray-600" v-if="funcoesPlanejadas.length">Total de funções: {{ totalFuncoes }}</div>
             <div class="flex gap-2">
-              <button type="button" class="px-3 py-1.5 text-sm rounded border border-blue-300 text-blue-700 hover:bg-blue-50" @click="showAddFunc = !showAddFunc">+ Adicionar função</button>
-              <button type="button" class="px-3 py-1.5 text-sm rounded border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-50" @click="clearFuncoes" :disabled="funcoesPlanejadas.length === 0">Remover todas</button>
+              <button type="button" class="btn btn-sm btn-primary" @click="showAddFunc = !showAddFunc">
+                <Icon name="squares-2x2" class="w-4 h-4" />
+                <span>Adicionar função</span>
+              </button>
+              <button type="button" class="btn btn-sm btn-secondary text-red-600 border-red-300 hover:bg-red-50" @click="clearFuncoes" :disabled="funcoesPlanejadas.length === 0">
+                <Icon name="shield-check" class="w-4 h-4" />
+                <span>Remover todas</span>
+              </button>
             </div>
           </div>
 
@@ -1595,8 +1978,14 @@ function onAlterarEscala(horas: number){
           <div class="flex items-center justify-between mb-4">
             <div class="text-sm text-gray-600" v-if="funcoesPlanejadas.length">Total de funções: {{ totalFuncoes }}</div>
             <div class="flex gap-2">
-              <button type="button" class="px-3 py-1.5 text-sm rounded border border-blue-300 text-blue-700 hover:bg-blue-50" @click="showAddFunc = !showAddFunc">+ Adicionar função</button>
-              <button type="button" class="px-3 py-1.5 text-sm rounded border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-50" @click="clearFuncoes" :disabled="funcoesPlanejadas.length === 0">Remover todas</button>
+              <button type="button" class="btn btn-sm btn-primary" @click="showAddFunc = !showAddFunc">
+                <Icon name="squares-2x2" class="w-4 h-4" />
+                <span>Adicionar função</span>
+              </button>
+              <button type="button" class="btn btn-sm btn-secondary text-red-600 border-red-300 hover:bg-red-50" @click="clearFuncoes" :disabled="funcoesPlanejadas.length === 0">
+                <Icon name="shield-check" class="w-4 h-4" />
+                <span>Remover todas</span>
+              </button>
             </div>
           </div>
 
@@ -1987,28 +2376,39 @@ function onAlterarEscala(horas: number){
 
       <!-- Step 4: Team & Budget -->
       <div v-if="step.id === 'team'" class="space-y-6">
-
-        <!-- Catálogo Automático (reintroduzido) -->
-        <div class="card p-6">
-          <h3 class="text-lg font-semibold text-gray-900 mb-4">Catálogo Automático de Mão de Obra</h3>
-          <p class="text-gray-600 mb-4">Sugestões baseadas no seu evento (ajuste no carrinho):</p>
+        <div class="p-6 space-y-6">
+          <TurnosResumoOperacao
+            v-if="resumoOperacao"
+            :resumo="resumoOperacao"
+            :datas="draft.datas"
+            :total-by-type="{ horasTrabalho: resumoOperacao.horasPorDia, noturnas: resumoOperacao.horasNoturnasPorDia, temPausa: resumoOperacao.temPausa1h }"
+            :horas-por-turno-diario="{ manha:0, tarde:0, noite:0, madrugada:0 }"
+            :daily-extra-minutes="0"
+            :total-turnos-periodo="(draft.datas?.length || 0) * (resumoOperacao?.quantidadeTurnos || 0)"
+          />
 
           <CastingBuilder
+            ref="castingRef"
             :initial-guests="draft.publico.convidados_estimados || 0"
             :initial-service-style="serviceStyleSeed"
             :initial-has-stage="Boolean(draft.tecnica.palco.largura_m || draft.tecnica.palco.profundidade_m)"
             :equipes="draft.equipes"
-            @update:equipes="v => (draft.equipes = v)"
+            @update:equipes="v => { draft.equipes = v; refreshBudgetSummary() }"
             :taxa-servico-pct="draft.financeiro.taxa_servico_pct"
-            @update:taxa-servico-pct="v => (draft.financeiro.taxa_servico_pct = v)"
+            @update:taxa-servico-pct="v => { draft.financeiro.taxa_servico_pct = v; refreshBudgetSummary() }"
             :fixed-costs="draft.financeiro.custos_fixos"
-            @update:fixed-costs="v => (draft.financeiro.custos_fixos = v)"
+            @update:fixed-costs="v => { draft.financeiro.custos_fixos = v; refreshBudgetSummary() }"
             :event-dates="draft.datas"
-            :shifts="draft.turnos || []"
+            :shifts="turnosEfetivos || []"
             :selected-services="draft.servicos_principais || []"
             :planned-roles="funcoesPlanejadas"
             :resumo-operacao="resumoOperacao"
             :segmento="draft.segmento"
+            :evento-nome="draft.evento_nome"
+            :cliente-nome="draft.cliente_nome"
+            :local-nome="draft.venue?.nome"
+            :tipo-escala="tipoEscala"
+            :modo-equipes="modoEquipes"
           />
         </div>
 
@@ -2019,6 +2419,130 @@ function onAlterarEscala(horas: number){
       <!-- Step 5: Final Review -->
       <div v-if="step.id === 'final'" class="space-y-6">
         <!-- Event Summary -->
+
+        <!-- Resumo Geral (visual) -->
+        <div class="card p-6 space-y-4">
+          <div class="flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-gray-900">Resumo Geral</h3>
+            <div class="text-xs text-slate-500" v-if="budgetSummary">Atualizado</div>
+          </div>
+
+          <!-- Indicadores principais -->
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div class="rounded-lg border p-3 bg-white/70">
+              <div class="text-[11px] text-slate-600">Subtotal</div>
+              <div class="text-base font-bold">{{ money(budgetSummary?.totals?.subtotal || 0) }}</div>
+            </div>
+            <div class="rounded-lg border p-3 bg-white/70">
+              <div class="text-[11px] text-slate-600">Taxa de Serviço ({{ budgetSummary?.feePct || 0 }}%)</div>
+              <div class="text-base font-bold">{{ money(budgetSummary?.totals?.serviceFee || 0) }}</div>
+            </div>
+            <div class="rounded-lg border p-3 bg-white/70">
+              <div class="text-[11px] text-slate-600">Custos Fixos</div>
+              <div class="text-base font-bold">{{ money(budgetSummary?.fixed || 0) }}</div>
+            </div>
+            <div class="rounded-lg border p-3 bg-emerald-50 border-emerald-200">
+              <div class="text-[11px] text-emerald-700">Total</div>
+              <div class="text-base font-bold text-emerald-900">{{ money(budgetSummary?.totals?.total || 0) }}</div>
+            </div>
+          </div>
+
+          <!-- Etapas: Infos, Datas/Turnos, Serviços, Público -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="space-y-3">
+              <div class="rounded-lg border p-3">
+                <div class="text-[11px] text-slate-600 mb-1">Info Básica</div>
+                <div class="text-sm">
+                  <div><span class="text-slate-500">Evento:</span> <strong>{{ draft.evento_nome || '—' }}</strong></div>
+                  <div><span class="text-slate-500">Cliente:</span> <strong>{{ draft.cliente_nome || '—' }}</strong></div>
+                  <div><span class="text-slate-500">Local:</span> <strong>{{ draft.venue?.nome || '—' }}</strong></div>
+                  <div><span class="text-slate-500">Segmento:</span> <strong>{{ segmentosEvento.find(s => s.id === draft.segmento)?.nome || draft.segmento || '—' }}</strong></div>
+                  <div><span class="text-slate-500">Convidados:</span> <strong>{{ draft.publico?.convidados_estimados || 0 }}</strong></div>
+                </div>
+              </div>
+
+              <div class="rounded-lg border p-3">
+                <div class="text-[11px] text-slate-600 mb-1">Datas & Turnos</div>
+                <div class="flex flex-wrap gap-2 text-xs">
+                  <span v-for="d in (budgetSummary?.eventDates || draft.datas || [])" :key="d" class="px-2 py-1 rounded-full bg-slate-100 border">{{ d }}</span>
+                </div>
+                <div class="mt-2 text-xs text-slate-600">
+                  Horas por Dia: <strong>{{ (resumoOperacao?.horasPorDia || 0) }}</strong>h
+                  <span v-if="resumoOperacao?.temHoraExtra" class="ml-2 px-2 py-0.5 rounded-full bg-fuchsia-100 text-fuchsia-800">Hora extra</span>
+                  <span v-if="resumoOperacao?.temPausa1h" class="ml-2 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Pausa 1h</span>
+                  <div class="mt-1">
+                    Total de Horas no Período: <strong>{{ (resumoOperacao?.horasTotalPeriodo || 0) }}</strong>h
+                    <span class="text-slate-400">( {{ draft.datas?.length || 0 }} dia(s) )</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="rounded-lg border p-3">
+                <div class="text-[11px] text-slate-600 mb-1">Serviços Selecionados</div>
+                <div class="flex flex-wrap gap-2 text-xs">
+                  <span v-for="s in (draft.servicos_principais || [])" :key="s" class="px-2 py-1 rounded-full bg-indigo-50 text-indigo-800 border border-indigo-200">{{ s }}</span>
+                  <span v-if="!(draft.servicos_principais || []).length" class="text-slate-500">Nenhum serviço selecionado</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Equipes & Totais -->
+            <div class="space-y-3">
+              <div class="rounded-lg border p-3">
+                <div class="text-[11px] text-slate-600 mb-2">Totais de Equipes</div>
+                <div class="grid grid-cols-3 gap-2 text-xs">
+                  <div class="bg-white rounded border p-2">
+                    <div class="text-[10px] text-slate-500">Profissionais</div>
+                    <div class="font-semibold">{{ budgetSummary?.totals?.totalProfessionals || 0 }}</div>
+                  </div>
+                  <div class="bg-white rounded border p-2">
+                    <div class="text-[10px] text-slate-500">Períodos</div>
+                    <div class="font-semibold">{{ budgetSummary?.totals?.totalPeriods || 0 }}</div>
+                  </div>
+                  <div class="bg-white rounded border p-2">
+                    <div class="text-[10px] text-slate-500">Funções</div>
+                    <div class="font-semibold">{{ budgetSummary?.totals?.uniqueRoles || 0 }}</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="rounded-lg border p-3">
+                <div class="text-[11px] text-slate-600 mb-2">Equipes Selecionadas</div>
+                <div v-if="!(budgetSummary?.cart || []).length" class="text-xs text-slate-500">Nenhuma função adicionada</div>
+                <div v-else class="space-y-2">
+                  <div v-for="line in (budgetSummary?.cart || [])" :key="line.key" class="border rounded p-2">
+                    <div class="flex items-center justify-between">
+                      <div class="text-sm font-medium truncate">{{ line.key }} <span class="text-slate-400">• {{ line.sector }}</span></div>
+                      <div class="text-sm font-semibold">{{ itemQtyFromSummary(line) }} prof • {{ money(itemSubtotalFromSummary(line)) }}</div>
+                    </div>
+                    <div class="mt-1 flex flex-wrap gap-1 text-[11px]">
+                      <span v-for="a in (line.assignments || [])" :key="a.date+'|'+a.period" class="px-2 py-0.5 rounded border"
+                        :class="a.isExtra ? 'bg-fuchsia-50 border-fuchsia-200 text-fuchsia-800' : 'bg-slate-50 border-slate-200 text-slate-700'">
+                        {{ a.date }} • {{ a.isExtra ? 'extra' : a.period }} • {{ a.qty }}x {{ money(a.price) }}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- JSON Debug -->
+        <div class="card p-6">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-lg font-semibold text-gray-900">JSON Debug</h3>
+            <button type="button"
+              @click="copyJsonDebug"
+              class="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs hover:bg-slate-50">
+              Copiar JSON
+            </button>
+          </div>
+          <pre class="text-xs bg-slate-900 text-slate-100 rounded-lg p-3 overflow-auto max-h-96">
+<code>{{ jsonDebugPretty }}</code>
+          </pre>
+        </div>
+
         <div class="card p-6 bg-gradient-to-r from-green-50 to-blue-50 border-green-200">
           <h3 class="text-lg font-semibold text-gray-900 mb-4">Resumo do Evento</h3>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
@@ -2073,6 +2597,28 @@ function onAlterarEscala(horas: number){
       </div>
     </template>
   </FormWizard>
+  <!-- Footer Atalhos + Mensagem Bloqueio -->
+  <div class="mt-4 text-xs text-gray-500 flex flex-col gap-2 select-none">
+    <transition name="fade">
+      <div v-if="navBlockMessage" class="flex items-center gap-2 px-3 py-1.5 bg-amber-50 border border-amber-200 text-amber-700 rounded shadow-sm max-w-sm ml-auto">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+        <span>{{ navBlockMessage }}</span>
+      </div>
+    </transition>
+    <div class="flex items-center gap-4 justify-end">
+      <div class="flex items-center gap-1">
+        <span class="inline-flex items-center justify-center px-1.5 py-0.5 border border-gray-300 rounded bg-gray-50 font-mono text-[10px] leading-none shadow-sm">{{ primaryModKey }}</span>
+        <span class="inline-flex items-center justify-center px-1 py-0.5 border border-gray-300 rounded bg-gray-50 font-mono text-[10px] leading-none shadow-sm">←</span>
+        <span class="text-gray-600">Voltar passo</span>
+      </div>
+      <div class="flex items-center gap-1">
+        <span class="inline-flex items-center justify-center px-1.5 py-0.5 border border-gray-300 rounded bg-gray-50 font-mono text-[10px] leading-none shadow-sm">{{ primaryModKey }}</span>
+        <span class="inline-flex items-center justify-center px-1 py-0.5 border border-gray-300 rounded bg-gray-50 font-mono text-[10px] leading-none shadow-sm">→</span>
+        <span class="text-gray-600">Avançar passo</span>
+      </div>
+      <!-- <div class="text-gray-400">(Atalhos ativos)</div> -->
+    </div>
+  </div>
 </template>
 
 

@@ -9,33 +9,23 @@
     <!-- Navegação -->
     <nav class="mt-3 space-y-2">
       <RouterLink to="/dashboard" class="nav-link block flex items-center gap-3 border-b dark:border-zinc-700">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9.75l9-7.5 9 7.5M4.5 10.5V21h15V10.5" />
-        </svg>
+        <HomeIcon class="w-5 h-5" />
         <span>Home</span>
       </RouterLink>
       <RouterLink to="/solicitacoes" class="nav-link block flex items-center gap-3 border-b dark:border-zinc-700">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3h6m-6 4h6M7 7h10a2 2 0 012 2v10a2 2 0 01-2 2H7a2 2 0 01-2-2V9a2 2 0 012-2z" />
-        </svg>
+        <ClipboardDocumentListIcon class="w-5 h-5" />
         <span>Solicitações</span>
       </RouterLink>
       <RouterLink to="/clients" class="nav-link block flex items-center gap-3 border-b dark:border-zinc-700">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20v-2a4 4 0 00-4-4H7a4 4 0 00-4 4v2m14 0h4v-2a4 4 0 00-3-3.87M15 7a4 4 0 11-8 0 4 4 0 018 0" />
-        </svg>
+        <UsersIcon class="w-5 h-5" />
         <span>Clientes</span>
       </RouterLink>
       <RouterLink to="/cooperados" class="nav-link block flex items-center gap-3 border-b dark:border-zinc-700">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2m-9 0h10a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2V9a2 2 0 012-2z" />
-        </svg>
+        <BriefcaseIcon class="w-5 h-5" />
         <span>Cooperados</span>
       </RouterLink>
       <RouterLink to="/billing" class="nav-link block flex items-center gap-3 border-b dark:border-zinc-700">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4m0-8V4m0 12v4m6-8a6 6 0 11-12 0 6 6 0 0112 0z" />
-        </svg>
+        <BanknotesIcon class="w-5 h-5" />
         <span>Faturamento</span>
       </RouterLink>
      
@@ -47,26 +37,19 @@
     <!-- Ações -->
     <div class="flex flex-col gap-2">
       <RouterLink to="/settings" class="nav-link text-left flex items-center gap-3">
-        <Icon name="wrench-screwdriver" class="w-5 h-5" />
+        <WrenchScrewdriverIcon class="w-5 h-5" />
         <span>Configurações</span>
       </RouterLink>
       <RouterLink to="/users" class="nav-link text-left flex items-center gap-3">
-        <Icon name="users" class="w-5 h-5" />
+        <UserGroupIcon class="w-5 h-5" />
         <span>Usuários</span>
       </RouterLink>
       <button @click="toggleTheme" class="nav-link text-left flex items-center gap-3">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-          <circle cx="12" cy="12" r="3"></circle>
-          <path stroke-linecap="round" stroke-linejoin="round" d="M12 2v2M12 20v2M2 12h2M20 12h2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
-        </svg>
+        <component :is="isDark ? SunIcon : MoonIcon" class="w-5 h-5" />
         <span>{{ isDark ? 'Tema claro' : 'Tema escuro' }}</span>
       </button>
       <button v-if="currentUser" @click="handleLogout" class="nav-link text-left flex items-center gap-3">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M19 5v14"></path>
-          <path stroke-linecap="round" stroke-linejoin="round" d="M11 8l4 4-4 4"></path>
-          <path stroke-linecap="round" stroke-linejoin="round" d="M3 12h12"></path>
-        </svg>
+        <ArrowRightOnRectangleIcon class="w-5 h-5" />
         <span>Sair</span>
       </button>
     </div>
@@ -77,7 +60,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuth } from '../stores/auth'
-import Icon from '@/components/Icon.vue'
+import { HomeIcon, ClipboardDocumentListIcon, UsersIcon, BriefcaseIcon, BanknotesIcon, WrenchScrewdriverIcon, UserGroupIcon, SunIcon, MoonIcon, ArrowRightOnRectangleIcon } from '@heroicons/vue/24/outline'
 
 const router = useRouter()
 const { currentUser, logout } = useAuth()

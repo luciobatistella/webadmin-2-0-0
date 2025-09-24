@@ -48,10 +48,12 @@ const SEED_catalog_roles = [
 
 
 const SEED_price_multipliers = {
-  period: { manha: 1.0, tarde: 1.1, noite: 1.3 },
+  period: { madrugada: 1.2, manha: 1.0, tarde: 1.1, noite: 1.3 },
   dayType: { weekday: 1.0, weekend: 1.4, holiday: 1.6 },
   extra: { on: 1.5, off: 1.0 },
-  pause: { hasPausa1h: 1.0, none: 1.0 }
+  pause: { hasPausa1h: 1.0, none: 1.0 },
+  // multiplicador adicional quando houver hora extra em período madrugada (configurável)
+  madrugadaExtra: 1.25
 }
 
 
@@ -140,6 +142,75 @@ const SEED_categorias_servicos = [
   ]}
 ]
 
+// Novos seeds para catálogo expandido
+const SEED_multiplicadores_equipes = {
+  alimentacao: { 'Garçom': 30, 'Copeiro': 80 },
+  estacionamento: { 'Manobrista': 50, 'Coordenador de Estacionamento': 300 },
+  traducao: { 'Intérprete': 1, 'Técnico de Tradução': 2 },
+  seguranca: { 'Segurança': 150, 'Brigadista': 500 },
+  recepcao: { 'Recepcionista': 120, 'Operador de Credenciamento': 200 },
+  limpeza: { 'Auxiliar de Limpeza': 200, 'Supervisor de Limpeza': 300 },
+  logistica: { 'Carregador': 300, 'Motorista': 400 }
+}
+
+const SEED_setor_icons = {
+  'Alimentação & Bebidas': 'fork-knife',
+  'Estacionamento & Valet': 'car',
+  'Tradução & Interpretação': 'language',
+  'Segurança & Saúde': 'shield-check',
+  'Recepção & Credenciamento': 'identification',
+  'Limpeza & Manutenção': 'sparkles',
+  'Logística & Transporte': 'truck'
+}
+
+const SEED_regras_turnos = {
+  horas_base_turno: 8,
+  horas_pausa_obrigatoria: 8,
+  faixas: [
+    { nome: 'Turno Madrugada', inicio: 0, fim: 5 },
+    { nome: 'Turno Manhã', inicio: 5, fim: 12 },
+    { nome: 'Turno Tarde', inicio: 12, fim: 18 },
+    { nome: 'Turno Noite', inicio: 18, fim: 24 }
+  ]
+}
+
+// Seed híbrido (C) para role_rates: gera automaticamente todas as combinações
+// Estrutura: { [roleKey]: { [dayType]: { [period]: valor } } }
+// dayType: weekday | saturday | sunday | holiday
+// period: manha | tarde | noite | extra
+function buildSeedRoleRates(catalog: any[]) {
+  const seed: Record<string, any> = {}
+  const dayTypes: Array<'weekday' | 'saturday' | 'sunday' | 'holiday'> = ['weekday', 'saturday', 'sunday', 'holiday']
+  const periods: Array<'madrugada' | 'manha' | 'tarde' | 'noite' | 'extra'> = ['madrugada','manha','tarde','noite','extra']
+  catalog.forEach(role => {
+    const base = Number(role.basePrice) || 0
+    seed[role.key] = {}
+    dayTypes.forEach(dt => {
+      seed[role.key][dt] = {}
+      periods.forEach(p => {
+        // Regras de geração inicial:
+        // weekday: base
+        // madrugada +20%, tarde +5%, noite +15%, extra +50%
+        // saturday: +30% sobre valor já ajustado do período; sunday: +50%; holiday: +70%
+        let v = base
+        if (p === 'madrugada') v = base * 1.20
+        if (p === 'tarde') v = base * 1.05
+        else if (p === 'noite') v = base * 1.15
+        else if (p === 'extra') v = base * 1.5
+        // Ajuste por tipo de dia (aplicado depois do período)
+        let multDay = 1
+        if (dt === 'saturday') multDay = 1.30
+        else if (dt === 'sunday') multDay = 1.50
+        else if (dt === 'holiday') multDay = 1.70
+        seed[role.key][dt][p] = Math.round(v * multDay)
+      })
+    })
+  })
+  return seed
+}
+
+let SEED_role_rates = buildSeedRoleRates(SEED_catalog_roles)
+
 
 const form = ref<Record<string, any>>({ defaults: { taxa_servico_pct: 0, fixed_costs: 0 } })
 const loading = ref(false)
@@ -150,6 +221,10 @@ const role_aliases_json = ref('')
 const service_to_sectors_json = ref('')
 const segmentos_evento_json = ref('')
 const categorias_servicos_json = ref('')
+const multiplicadores_equipes_json = ref('')
+const setor_icons_json = ref('')
+const regras_turnos_json = ref('')
+const role_rates_json = ref('')
 
 function pretty(v: any){ try { return JSON.stringify(v, null, 2) } catch { return '' } }
 function parseJsonSafe(s: string, fallback: any){ try { return JSON.parse(s) } catch { return fallback } }
@@ -167,6 +242,10 @@ async function load(){
     if (!form.value.service_to_sectors) form.value.service_to_sectors = SEED_service_to_sectors
     if (!Array.isArray(form.value.segmentos_evento)) form.value.segmentos_evento = SEED_segmentos_evento
     if (!Array.isArray(form.value.categorias_servicos)) form.value.categorias_servicos = SEED_categorias_servicos
+  if (!form.value.multiplicadores_equipes) form.value.multiplicadores_equipes = SEED_multiplicadores_equipes
+  if (!form.value.setor_icons) form.value.setor_icons = SEED_setor_icons
+  if (!form.value.regras_turnos) form.value.regras_turnos = SEED_regras_turnos
+  if (!form.value.role_rates) form.value.role_rates = SEED_role_rates
     if (!form.value.defaults) form.value.defaults = {}
     if (typeof form.value.defaults.taxa_servico_pct !== 'number') form.value.defaults.taxa_servico_pct = 0
     if (typeof form.value.defaults.fixed_costs !== 'number') form.value.defaults.fixed_costs = 0
@@ -178,6 +257,10 @@ async function load(){
     service_to_sectors_json.value = pretty(form.value.service_to_sectors)
     segmentos_evento_json.value = pretty(form.value.segmentos_evento)
     categorias_servicos_json.value = pretty(form.value.categorias_servicos)
+  multiplicadores_equipes_json.value = pretty(form.value.multiplicadores_equipes)
+  setor_icons_json.value = pretty(form.value.setor_icons)
+  regras_turnos_json.value = pretty(form.value.regras_turnos)
+  role_rates_json.value = pretty(form.value.role_rates)
   } finally { loading.value = false }
 }
 
@@ -191,6 +274,10 @@ async function save(){
     form.value.service_to_sectors = parseJsonSafe(service_to_sectors_json.value, {})
     form.value.segmentos_evento = parseJsonSafe(segmentos_evento_json.value, [])
     form.value.categorias_servicos = parseJsonSafe(categorias_servicos_json.value, [])
+  form.value.multiplicadores_equipes = parseJsonSafe(multiplicadores_equipes_json.value, {})
+  form.value.setor_icons = parseJsonSafe(setor_icons_json.value, {})
+  form.value.regras_turnos = parseJsonSafe(regras_turnos_json.value, {})
+  form.value.role_rates = parseJsonSafe(role_rates_json.value, {})
 
     await updateAdminConfig(form.value, new URLSearchParams())
     alert('Configurações salvas')
@@ -204,6 +291,12 @@ function seedDefaults(){
   service_to_sectors_json.value = pretty(SEED_service_to_sectors)
   segmentos_evento_json.value = pretty(SEED_segmentos_evento)
   categorias_servicos_json.value = pretty(SEED_categorias_servicos)
+  multiplicadores_equipes_json.value = pretty(SEED_multiplicadores_equipes)
+  setor_icons_json.value = pretty(SEED_setor_icons)
+  regras_turnos_json.value = pretty(SEED_regras_turnos)
+  // Regenerar role_rates sempre que recarregar padrões baseado no catálogo atual
+  SEED_role_rates = buildSeedRoleRates(parseJsonSafe(catalog_roles_json.value, SEED_catalog_roles))
+  role_rates_json.value = pretty(SEED_role_rates)
 }
 
 
@@ -246,6 +339,11 @@ onMounted(load)
           <textarea v-model="price_multipliers_json" class="w-full h-48 font-mono text-xs rounded border p-2"></textarea>
         </div>
         <div class="space-y-1">
+          <label class="text-xs text-zinc-500">Matriz de Tarifas por Função (role_rates)</label>
+          <textarea v-model="role_rates_json" class="w-full h-56 font-mono text-[11px] leading-tight rounded border p-2"></textarea>
+          <p class="text-[10px] text-zinc-500 leading-snug">Estrutura: role_rates[roleKey][dayType][period]. dayType: weekday|saturday|sunday|holiday. period: manha|tarde|noite|extra.</p>
+        </div>
+        <div class="space-y-1">
           <label class="text-xs text-zinc-500">Aliases de Função (role_aliases)</label>
           <textarea v-model="role_aliases_json" class="w-full h-40 font-mono text-xs rounded border p-2"></textarea>
         </div>
@@ -264,6 +362,25 @@ onMounted(load)
         <div class="space-y-1">
           <label class="text-xs text-zinc-500">Categorias de Serviços (categorias_servicos)</label>
           <textarea v-model="categorias_servicos_json" class="w-full h-48 font-mono text-xs rounded border p-2"></textarea>
+        </div>
+      </div>
+
+      <h2 class="text-base font-semibold">Regras Operacionais</h2>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="space-y-1 md:col-span-1">
+          <label class="text-xs text-zinc-500">Multiplicadores de Equipes (multiplicadores_equipes)</label>
+          <textarea v-model="multiplicadores_equipes_json" class="w-full h-60 font-mono text-xs rounded border p-2"></textarea>
+          <p class="text-[10px] text-zinc-500 leading-snug">Mapa categoria → { Função: divisor_convidados }. Usado para sugestões automáticas.</p>
+        </div>
+        <div class="space-y-1 md:col-span-1">
+          <label class="text-xs text-zinc-500">Ícones de Setor (setor_icons)</label>
+          <textarea v-model="setor_icons_json" class="w-full h-60 font-mono text-xs rounded border p-2"></textarea>
+          <p class="text-[10px] text-zinc-500 leading-snug">Mapeia nome do setor → identificador de ícone (ex: heroicon outline).</p>
+        </div>
+        <div class="space-y-1 md:col-span-1">
+          <label class="text-xs text-zinc-500">Regras de Turnos (regras_turnos)</label>
+          <textarea v-model="regras_turnos_json" class="w-full h-60 font-mono text-xs rounded border p-2"></textarea>
+          <p class="text-[10px] text-zinc-500 leading-snug">Definição de horas base, pausa obrigatória e faixas nomeadas.</p>
         </div>
       </div>
 

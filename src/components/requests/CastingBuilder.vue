@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { getAdminConfig } from '@/services/settings'
+import { priceFor, PeriodKey, priceBreakdown } from '@/services/pricing'
+import { useAppConfig } from '@/stores/appConfig'
 
 
 // Fallbacks locais caso /settings ainda não esteja preenchido
@@ -37,6 +39,13 @@ const props = withDefaults(defineProps<{
   initialGuests?: number
   initialServiceStyle?: 'prato' | 'buffet'
   initialHasStage?: boolean
+  // Identificadores do evento (opcionais)
+  eventoNome?: string
+  clienteNome?: string
+  localNome?: string
+  // Navegação e modo (opcionais)
+  tipoEscala?: 'hora' | 'diaria' | 'escala' | null
+  modoEquipes?: 'automatico' | 'manual' | null
   // v-models
   equipes: EquipLine[]
   taxaServicoPct?: number
@@ -77,6 +86,11 @@ const props = withDefaults(defineProps<{
   initialGuests: 150,
   initialServiceStyle: 'prato',
   initialHasStage: true,
+  eventoNome: '',
+  clienteNome: '',
+  localNome: '',
+  tipoEscala: null,
+  modoEquipes: null,
   taxaServicoPct: 10,
   fixedCosts: 0,
   eventDates: () => [],
@@ -164,7 +178,7 @@ const debugJson = computed(() => {
 let catalog: any[] = []
 // Multiplicadores de preço
 let priceMultipliers: any = {
-  period: { manha: 1.0, tarde: 1.0, noite: 1.0 },
+  period: { madrugada: 1.0, manha: 1.0, tarde: 1.0, noite: 1.0 },
   dayType: { weekday: 1.0, weekend: 1.0, holiday: 1.0 },
   extra: { on: 1.0, off: 1.0 },
   pause: { hasPausa1h: 1.0, none: 1.0 }
@@ -222,10 +236,11 @@ const hasStage = ref<boolean>(!!props.initialHasStage)
 // Nova estrutura do carrinho - por data e período
 interface PeriodAssignment {
   date: string
-  period: 'manha' | 'tarde' | 'noite' | 'extra'
+  period: 'madrugada' | 'manha' | 'tarde' | 'noite' | 'extra' | 'pausa'
   qty: number
   price: number
   isExtra?: boolean
+  isPausa?: boolean
 }
 
 interface CartLine {
@@ -244,17 +259,28 @@ function timeToMin(hhmm: string): number {
 function overlaps(a1: number, a2: number, b1: number, b2: number) {
   return Math.max(a1, b1) < Math.min(a2, b2)
 }
-function deriveBandsFromShifts(): Set<'manha' | 'tarde' | 'noite'> {
+function deriveBandsFromShifts(): Set<'madrugada' | 'manha' | 'tarde' | 'noite'> {
   const shifts = props.shifts || []
-  if (!shifts.length) return new Set(['manha', 'tarde', 'noite'])
-  const bands = new Set<'manha' | 'tarde' | 'noite'>()
+  // Se não há turnos definidos ainda, expor todos para não travar orçamento inicial
+  if (!shifts.length) return new Set(['madrugada','manha','tarde','noite'])
+  const bands = new Set<'madrugada' | 'manha' | 'tarde' | 'noite'>()
+  // Novas janelas alinhadas ao DateRangePicker: 00-06, 09-13, 13-18, 18-24
+  const ranges = {
+    madrugada: [0, 6*60],
+    manha: [9*60, 13*60],
+    tarde: [13*60, 18*60],
+    noite: [18*60, 24*60]
+  } as const
   shifts.forEach(s => {
     const start = timeToMin(s.inicio)
-    const end = timeToMin(s.fim)
-    const a1 = start, a2 = end > start ? end : end + 24 * 60 // simples tratamento se "vira" o dia
-    if (overlaps(a1, a2, 6 * 60, 12 * 60)) bands.add('manha')
-    if (overlaps(a1, a2, 12 * 60, 18 * 60)) bands.add('tarde')
-    if (overlaps(a1, a2, 18 * 60, 24 * 60)) bands.add('noite')
+    const endRaw = timeToMin(s.fim)
+    const a1 = start
+    const a2 = endRaw > start ? endRaw : endRaw + 24*60 // se vira dia
+    const testOverlap = (rStart:number, rEnd:number) => overlaps(a1, a2, rStart, rEnd)
+    if (testOverlap(ranges.madrugada[0], ranges.madrugada[1])) bands.add('madrugada')
+    if (testOverlap(ranges.manha[0], ranges.manha[1])) bands.add('manha')
+    if (testOverlap(ranges.tarde[0], ranges.tarde[1])) bands.add('tarde')
+    if (testOverlap(ranges.noite[0], ranges.noite[1])) bands.add('noite')
   })
   return bands
 }
@@ -262,16 +288,17 @@ function deriveBandsFromShifts(): Set<'manha' | 'tarde' | 'noite'> {
 
 // Computed para gerar todas as combinações de data/período do evento
 const eventPeriods = computed(() => {
-  const periods: Array<{ date: string, period: 'manha' | 'tarde' | 'noite', dayType: string, label: string }> = []
+  const periods: Array<{ date: string, period: 'madrugada' | 'manha' | 'tarde' | 'noite', dayType: string, label: string }> = []
 
   const bands = deriveBandsFromShifts()
   props.eventDates?.forEach(date => {
     const dayType = getDayType(date)
     const dateLabel = formatDate(date)
 
-    if (bands.has('manha')) periods.push({ date, period: 'manha', dayType, label: `${dateLabel} - Manhã (6h-12h)` })
-    if (bands.has('tarde')) periods.push({ date, period: 'tarde', dayType, label: `${dateLabel} - Tarde (12h-18h)` })
-    if (bands.has('noite')) periods.push({ date, period: 'noite', dayType, label: `${dateLabel} - Noite (18h-24h)` })
+  if (bands.has('madrugada')) periods.push({ date, period: 'madrugada', dayType, label: `${dateLabel} - Madrugada (00-06)` })
+  if (bands.has('manha')) periods.push({ date, period: 'manha', dayType, label: `${dateLabel} - Manhã (09-13)` })
+  if (bands.has('tarde')) periods.push({ date, period: 'tarde', dayType, label: `${dateLabel} - Tarde (13-18)` })
+  if (bands.has('noite')) periods.push({ date, period: 'noite', dayType, label: `${dateLabel} - Noite (18-24)` })
   })
 
   return periods
@@ -309,21 +336,21 @@ const formatDate = (dateStr: string): string => {
   })
 }
 
-// Função para calcular preço baseado em data e período
-const calculatePrice = (roleKey: string, dateStr: string, period: 'manha' | 'tarde' | 'noite'): number => {
-  const basePrice = catalog.find(r => r.key === roleKey)?.basePrice || 0
-  const dayType = getDayType(dateStr)
-
-  const periodMultiplier = priceMultipliers.period[period]
-  const dayTypeMultiplier = priceMultipliers.dayType[dayType]
-
-  // Adicionais globais do resumo da operação
-  const hasExtra = !!props.resumoOperacao?.temHoraExtra
-  const extraMultiplier = hasExtra ? priceMultipliers.extra.on : priceMultipliers.extra.off
-  // Pausa 1h não altera preço unitário (já reduz horas efetivas), mas deixo placeholder para regras futuras
-  // const pauseMultiplier = props.resumoOperacao?.temPausa1h ? priceMultipliers.pause.hasPausa1h : priceMultipliers.pause.none
-
-  return Math.round(basePrice * periodMultiplier * dayTypeMultiplier * extraMultiplier)
+// Store config role_rates
+const { ensureLoaded: ensureConfig, catalogRoles } = useAppConfig()
+// Sincroniza catálogo local com store quando carregar
+watch(catalogRoles, (v) => {
+  try {
+    if (Array.isArray(v) && v.length) {
+      catalog = v as any
+      recalcAllPrices()
+    }
+  } catch {}
+}, { immediate: true })
+const holidaySet = new Set(holidays)
+function calculatePrice(roleKey: string, dateStr: string, period: PeriodKey): number {
+  const hasExtra = !!(props.resumoOperacao?.temHoraExtra && !(props.resumoOperacao?.pausaInformada || props.resumoOperacao?.temPausa1h))
+  return priceFor({ roleKey, dateStr, period, hasExtraGlobal: hasExtra }, holidaySet)
 }
 
 // Recalcula todos os preços dos assignments conforme novas regras (ex.: hora extra, feriado)
@@ -331,14 +358,14 @@ function recalcAllPrices() {
   try {
     cart.value.forEach(line => {
       line.assignments.forEach(a => {
-        if (a.isExtra) {
-          a.price = 0
-        } else {
-          a.price = calculatePrice(line.key, a.date, a.period as 'manha' | 'tarde' | 'noite')
+        if (a.isExtra || a.period === 'extra') {
+          a.price = calculatePrice(line.key, a.date, 'extra')
+        } else if (!a.isPausa) {
+          a.price = calculatePrice(line.key, a.date, a.period as PeriodKey)
         }
       })
     })
-  } catch {}
+  } catch { }
 }
 
 
@@ -349,6 +376,8 @@ async function loadSettings() {
     const cfg = (resp as any)?.data || resp || {}
     if (Array.isArray(cfg.catalog_roles) && cfg.catalog_roles.length) {
       catalog = cfg.catalog_roles
+    } else if (Array.isArray(catalogRoles.value) && catalogRoles.value.length) {
+      catalog = catalogRoles.value as any
     } else {
       catalog = FALLBACK_CATALOG
     }
@@ -369,6 +398,19 @@ async function loadSettings() {
       if (typeof cfg.defaults.taxa_servico_pct === 'number') feePct.value = cfg.defaults.taxa_servico_pct
       if (typeof cfg.defaults.fixed_costs === 'number') fixed.value = cfg.defaults.fixed_costs
     }
+    // Garante que store global esteja carregado antes de calcular preços
+    await ensureConfig()
+    // Se carrinho já estava preenchido com fallback, resemear para aplicar preços corretos
+    const hadItems = cart.value.length > 0
+    if (hadItems) {
+      cart.value.forEach(line => {
+        line.assignments.forEach(a => {
+          if (!a.isExtra && !a.isPausa) {
+            a.price = calculatePrice(line.key, a.date, a.period as PeriodKey)
+          }
+        })
+      })
+    }
     recalcAllPrices()
   } catch (e) {
     log('settings.load.error', e)
@@ -387,6 +429,9 @@ const shiftWorkMinutes = computed(() => {
       const s = typeof t?.inicioAbs === 'number' ? t.inicioAbs : timeToMin(t?.inicio || '00:00')
       const e = typeof t?.fimAbs === 'number' ? t.fimAbs : timeToMin(t?.fim || '00:00')
       return sum + Math.max(0, (e - s))
+
+
+
     }, 0)
   } catch { return 0 }
 })
@@ -398,6 +443,18 @@ const escalaHorasEffective = computed(() => {
   if (props.resumoOperacao && typeof props.resumoOperacao.escalaHoras === 'number') return props.resumoOperacao.escalaHoras
   return 8
 })
+
+
+// Rótulos auxiliares para o resumo
+const labelTipoEscala = computed(() => {
+  return props.tipoEscala === 'hora' ? 'Hora trabalhada'
+    : props.tipoEscala === 'diaria' ? 'Diária'
+    : props.tipoEscala === 'escala' ? 'Escala/Plantão'
+    : '—'
+})
+const modoEquipesLabel = computed(() => props.modoEquipes === 'automatico' ? 'Automático' : props.modoEquipes === 'manual' ? 'Manual' : '—')
+const totalDiasEvento = computed(() => (props.eventDates?.length || 0))
+const totalTurnosEvento = computed(() => ((props.shifts || []).length))
 
 
 // Helpers catálogo (atualizados)
@@ -486,12 +543,12 @@ const addAllPeriods = (roleKey: string) => {
   })
 
   // Hora extra (exibição) — adiciona uma linha por data com preço 0
-  if (props.resumoOperacao?.temHoraExtra) {
+  if (props.resumoOperacao?.temHoraExtra && !(props.resumoOperacao?.pausaInformada || props.resumoOperacao?.temPausa1h)) {
     const dates = Array.from(new Set(eventPeriods.value.map(p => p.date)))
     dates.forEach(date => {
       const existsExtra = cartItem.assignments.some(a => a.date === date && a.period === 'extra')
       if (!existsExtra) {
-        cartItem.assignments.push({ date, period: 'extra', qty: 1, price: 0, isExtra: true })
+        cartItem.assignments.push({ date, period: 'extra', qty: 1, price: calculatePrice(roleKey, date, 'extra'), isExtra: true })
       }
     })
   }
@@ -537,7 +594,7 @@ const itemSubtotal = (item: CartLine) => {
 
 // Accordion por função
 const openMap = ref<Record<string, boolean>>({})
-function isOpen(key: string) { return openMap.value[key] !== false }
+function isOpen(key: string) { return openMap.value[key] === true }
 function toggleOpen(key: string) { openMap.value[key] = !isOpen(key) }
 
 // Métricas por item
@@ -568,9 +625,9 @@ function itemProfessionalsSmart(item: CartLine) {
 const totalProfessionalsSmart = computed(() => (cart.value || []).reduce((acc, it) => acc + itemProfessionalsSmart(it), 0))
 
 
-// Garante estado inicial "aberto" para novos itens
+// Garante estado inicial "fechado" para novos itens
 watch(cart, (v) => {
-  try { (v || []).forEach(i => { if (openMap.value[i.key] === undefined) openMap.value[i.key] = true }) } catch { }
+  try { (v || []).forEach(i => { if (openMap.value[i.key] === undefined) openMap.value[i.key] = false }) } catch { }
 }, { deep: true })
 
 // Estatísticas do carrinho
@@ -587,7 +644,7 @@ const totalProfessionals = computed(() => {
 const totalFuncoes = computed(() => {
   try {
     const roles = (props.plannedRoles || [])
-      .map((p:any) => (p?.funcao || p?.label || '').toString().trim().toLowerCase())
+      .map((p: any) => (p?.funcao || p?.label || '').toString().trim().toLowerCase())
       .filter(Boolean)
     return new Set(roles).size
   } catch { return 0 }
@@ -619,10 +676,10 @@ function seedFromEquipes() {
       })
     })
     // Hora extra por data (somente exibi e7 e3o)
-    if (props.resumoOperacao?.temHoraExtra) {
+    if (props.resumoOperacao?.temHoraExtra && !(props.resumoOperacao?.pausaInformada || props.resumoOperacao?.temPausa1h)) {
       const dates = Array.from(new Set(eventPeriods.value.map(p => p.date)))
       dates.forEach(date => {
-        newItem.assignments.push({ date, period: 'extra', qty: Math.max(0, line.quantidade || 0), price: 0, isExtra: true })
+        newItem.assignments.push({ date, period: 'extra', qty: Math.max(0, line.quantidade || 0), price: calculatePrice(key, date, 'extra'), isExtra: true })
       })
     }
     cart.value.push(newItem)
@@ -651,7 +708,7 @@ const plannedQtyByKey = computed<Record<string, number>>(() => {
       if (!role) return
       map[role.key] = (map[role.key] || 0) + (Number(p?.quantidade) || 0)
     })
-  } catch {}
+  } catch { }
   return map
 })
 
@@ -687,10 +744,10 @@ function seedFromPlannedRoles() {
         price: calculatePrice(role.key, period.date, period.period)
       })
     })
-    if (props.resumoOperacao?.temHoraExtra) {
+    if (props.resumoOperacao?.temHoraExtra && !(props.resumoOperacao?.pausaInformada || props.resumoOperacao?.temPausa1h)) {
       const dates = Array.from(new Set(eventPeriods.value.map(pp => pp.date)))
       dates.forEach(date => {
-        newItem.assignments.push({ date, period: 'extra', qty: Math.max(0, p.quantidade || 0), price: 0, isExtra: true })
+        newItem.assignments.push({ date, period: 'extra', qty: Math.max(0, p.quantidade || 0), price: calculatePrice(role.key, date, 'extra'), isExtra: true })
       })
     }
     newCart.push(newItem)
@@ -701,9 +758,40 @@ function seedFromPlannedRoles() {
 
 const totalPeriods = computed(() => {
   return cart.value.reduce((total, cartItem) => {
-    return total + cartItem.assignments.filter(a => !a.isExtra).length
+    return total + cartItem.assignments.filter(a => !a.isExtra && !a.isPausa).length
   }, 0)
 })
+
+// Agrupar assignments por dia para exibir a Hora Extra junto do respectivo dia
+function groupAssignmentsByDate(item: CartLine): Array<{ date: string; entries: PeriodAssignment[] }> {
+  const byDate: Record<string, PeriodAssignment[]> = {}
+    ; (item.assignments || []).forEach(a => {
+      if (!byDate[a.date]) byDate[a.date] = []
+      byDate[a.date].push(a)
+    })
+  const orderedDates = Array.from(new Set((props.eventDates || []).map((d: any) => (typeof d === 'string' ? d : d?.date)).filter(Boolean)))
+  const dates = orderedDates.length ? orderedDates : Object.keys(byDate).sort()
+  return dates
+    .filter(d => (byDate[d] || []).length)
+    .map(date => {
+      const entries = byDate[date].slice().sort((a, b) => {
+  const order: Record<string, number> = { madrugada: -1, manha: 0, tarde: 1, noite: 2, pausa: 3, extra: 4 }
+        const ai = order[a.period as any] ?? (a.isExtra ? 4 : 9)
+        const bi = order[b.period as any] ?? (b.isExtra ? 4 : 9)
+        return ai - bi
+      })
+      // Inserir 'Pausa 1h' entre períodos quando selecionada
+      const pauseOn = !!(props.resumoOperacao?.pausaInformada || props.resumoOperacao?.temPausa1h)
+      if (pauseOn) {
+        const idx = entries.findIndex(e => !e.isExtra && !(e as any).isPausa)
+        if (idx !== -1) {
+          entries.splice(idx + 1, 0, { date, period: 'pausa', qty: 0, price: 0, isPausa: true } as any)
+        }
+      }
+      return { date, entries }
+    })
+}
+
 
 // Defaults de horas por função
 function defaultHours(key: string) {
@@ -725,11 +813,11 @@ function addWithQuantity(roleKey: string, quantity: number) {
     existing.assignments.forEach(assignment => {
       assignment.qty = quantity
     })
-    if (props.resumoOperacao?.temHoraExtra) {
+    if (props.resumoOperacao?.temHoraExtra && !(props.resumoOperacao?.pausaInformada || props.resumoOperacao?.temPausa1h)) {
       const dates = Array.from(new Set(eventPeriods.value.map(p => p.date)))
       dates.forEach(date => {
         const existsExtra = existing.assignments.some(a => a.date === date && a.period === 'extra')
-        if (!existsExtra) existing.assignments.push({ date, period: 'extra', qty: quantity, price: 0, isExtra: true })
+        if (!existsExtra) existing.assignments.push({ date, period: 'extra', qty: quantity, price: calculatePrice(roleKey, date, 'extra'), isExtra: true })
       })
     }
   } else {
@@ -752,10 +840,10 @@ function addWithQuantity(roleKey: string, quantity: number) {
         })
       })
       // Hora extra por data (somente exibição)
-      if (props.resumoOperacao?.temHoraExtra) {
+      if (props.resumoOperacao?.temHoraExtra && !(props.resumoOperacao?.pausaInformada || props.resumoOperacao?.temPausa1h)) {
         const dates = Array.from(new Set(eventPeriods.value.map(p => p.date)))
         dates.forEach(date => {
-          newItem.assignments.push({ date, period: 'extra', qty: quantity, price: 0, isExtra: true })
+          newItem.assignments.push({ date, period: 'extra', qty: quantity, price: calculatePrice(roleKey, date, 'extra'), isExtra: true })
         })
       }
 
@@ -827,6 +915,49 @@ watch(cart, syncToEquipes, { deep: true })
 watch(feePct, v => emit('update:taxaServicoPct', v))
 watch(fixed, v => emit('update:fixedCosts', v))
 
+
+// Expor resumo de orçamento ao pai (Wizard Step-5)
+function getBudgetSummary() {
+  try {
+    return {
+      feePct: feePct.value,
+      fixed: fixed.value,
+      totals: {
+        subtotal: subtotal.value,
+        serviceFee: serviceFee.value,
+        total: total.value,
+        totalProfessionals: totalPlannedProfessionals.value,
+        totalPeriods: totalPeriods.value,
+        uniqueRoles: (cart.value || []).length,
+      },
+      cart: (() => { try { return JSON.parse(JSON.stringify(cart.value || [])) } catch { return (cart.value || []) } })(),
+      // Metadados do evento/fluxo
+      eventoNome: props.eventoNome || null,
+      clienteNome: props.clienteNome || null,
+      localNome: props.localNome || null,
+      tipoEscala: props.tipoEscala || null,
+      tipoEscalaLabel: labelTipoEscala.value,
+      modoEquipes: props.modoEquipes || null,
+      // Flags de pausa/hora extra em nível superior (para leitura fácil no JSON)
+      pausaSelecionada: !!(props.resumoOperacao?.pausaInformada),
+      hasPausa1h: !!(props.resumoOperacao?.temPausa1h),
+      hasHoraExtra: !!(props.resumoOperacao?.temHoraExtra),
+      // Dados operacionais
+      eventDates: props.eventDates,
+      shifts: props.shifts,
+      selectedServices: props.selectedServices,
+      resumoOperacao: props.resumoOperacao,
+      segmento: props.segmento,
+    }
+  } catch (e) {
+    return { error: 'failed_to_build_summary' }
+  }
+}
+
+// Disponibiliza ao componente pai via ref
+// @ts-ignore
+defineExpose({ getBudgetSummary })
+
 watch(() => props.resumoOperacao, v => { log('resumoOperacao', v); recalcAllPrices() }, { deep: true })
 
 onMounted(async () => {
@@ -848,6 +979,29 @@ watch(() => props.selectedServices, v => log('props.selectedServices', v), { dee
 watch(() => props.plannedRoles, v => log('props.plannedRoles', v), { deep: true })
 watch(eventPeriods, v => log('eventPeriods', v), { deep: true })
 watch(cart, v => log('cart', v), { deep: true })
+
+// Recalcular preços sempre que os períodos do evento (bandas derivadas) mudarem
+watch(eventPeriods, () => { try { recalcAllPrices() } catch {} })
+// Recalcular quando turnos (props.shifts) mudarem (ex: usuário reprocessa datas)
+watch(() => props.shifts, () => { try { recalcAllPrices() } catch {} }, { deep: true })
+
+function formatBreakdown(roleKey: string, a: any) {
+  try {
+    if (a.isPausa) return ''
+    const bd = priceBreakdown({ roleKey, dateStr: a.date, period: a.period, hasExtraGlobal: !!(props.resumoOperacao?.temHoraExtra && !(props.resumoOperacao?.pausaInformada || props.resumoOperacao?.temPausa1h)) }, holidaySet)
+    const parts: string[] = []
+    parts.push(`Origem: ${bd.origin}`)
+    if (bd.matrixValue) parts.push(`Matrix: ${bd.matrixValue}`)
+    else if (bd.weekdayFallback) parts.push(`WeekdayFallback: ${bd.weekdayFallback}`)
+    parts.push(`Base: ${bd.base}`)
+    if (bd.periodMultiplier !== 1) parts.push(`Período x${bd.periodMultiplier}`)
+    if (bd.dayTypeMultiplier !== 1) parts.push(`Dia x${bd.dayTypeMultiplier}`)
+    if (bd.madrugadaExtraMultiplier !== 1) parts.push(`MadrugadaExtra x${bd.madrugadaExtraMultiplier}`)
+    if (bd.extraGlobalMultiplier !== 1) parts.push(`ExtraGlobal x${bd.extraGlobalMultiplier}`)
+    parts.push(`Final: ${bd.final}`)
+    return parts.join('\n')
+  } catch { return '' }
+}
 
 
 // Guardas para semear o carrinho de forma segura
@@ -885,16 +1039,6 @@ watch([() => props.plannedRoles, eventPeriods], async () => {
 
 <template>
   <section class="">
-
-
-
-
-
-
-
-    <!-- Carrinho -->
-
-    <!-- Carrinho -->
     <div>
       <!-- <div class="flex items-center justify-between mb-3"> -->
       <!-- <div class="text-sm font-medium text-slate-700">Catálogo & Orçamento</div> -->
@@ -910,223 +1054,185 @@ watch([() => props.plannedRoles, eventPeriods], async () => {
       </details>
 
       <div class="md:flex md:gap-6">
-        <aside class="md:w-[40%] space-y-3">
-
-      <!-- Resumo do evento -->
-      <div v-if="(props.eventDates?.length || 0) > 0" class="mb-4">
-        <div class="space-y-3">
-          <!-- Datas do evento -->
-          <div class="p-3 bg-blue-50 border border-blue-200 rounded-lg">
-            <div class="flex items-center gap-2 text-sm text-blue-800 mb-1">
-              <div class="text-lg">📅</div>
-              <div>
-                <strong>Datas:</strong> {{ props.eventDates.length }} {{ props.eventDates.length === 1 ? 'dia' : 'dias' }}
-              </div>
-            </div>
-            <div class="text-xs text-blue-700">
-              {{ dateRangeLabel }}
-            </div>
-          </div>
-
-          <!-- Turnos detectados (inclui Pausa/Hora Extra) -->
-          <div class="p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
-            <div class="flex items-center gap-2 text-sm text-emerald-800 mb-1">
-              <div class="text-lg">⏱️</div>
-              <div><strong>Turnos:</strong> {{ (shiftsDisplay?.length || 0) }}</div>
-            </div>
-            <div class="flex flex-wrap gap-2 mt-1">
-              <template v-if="(shiftsDisplay?.length || 0) > 0">
-                <span v-for="(t, idx) in shiftsDisplay" :key="idx"
-                  class="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px]"
-                  :class="t.isPausa ? 'bg-amber-100 text-amber-800 border border-amber-200' : (t.isExtra ? 'bg-violet-100 text-violet-800 border border-violet-200' : 'bg-emerald-100 text-emerald-800 border border-emerald-200')">
-                  {{ t.nome }}
-                  <span class="opacity-70">{{ t.inicio }}–{{ t.fim }}</span>
-                </span>
-              </template>
-              <span v-else class="text-xs text-emerald-700">Sem turnos detectados</span>
-            </div>
-          </div>
-
-          <!-- Serviços selecionados -->
-
-          <!-- Totais (Profissionais, Períodos, Dias) -->
-
-
-          <div class="p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
-            <div class="flex items-center gap-2 text-sm text-indigo-800 mb-1">
-              <div class="text-lg">🧩</div>
-              <div><strong>Serviços:</strong> {{ (selectedServiceLabels?.length || 0) }}</div>
-            </div>
-            <div class="flex flex-wrap gap-2 mt-1">
-              <template v-if="(selectedServiceLabels?.length || 0) > 0">
-                <span v-for="(s, idx) in selectedServiceLabels" :key="idx"
-                  class="px-2 py-1 rounded bg-indigo-100 text-indigo-800 border border-indigo-200 text-[11px]">{{ s
-                  }}</span>
-              </template>
-              <span v-else class="text-xs text-indigo-700">Nenhum serviço selecionado</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Totais (Profissionais, Períodos, Dias) -->
-        <div class="p-3 bg-fuchsia-50 border border-fuchsia-200 rounded-lg">
-          <div class="flex items-center gap-2 text-sm text-fuchsia-800 mb-1">
-            <div class="text-lg">📊</div>
-            <div><strong>Totais</strong></div>
-          </div>
-          <div class="grid grid-cols-3 gap-2 text-xs">
-            <div class="bg-white/60 rounded px-2 py-1 border border-fuchsia-200">
-              <div class="text-[11px] text-fuchsia-700">Profissionais</div>
-              <div class="font-semibold text-fuchsia-900">{{ totalPlannedProfessionals }}</div>
-            </div>
-            <div class="bg-white/60 rounded px-2 py-1 border border-fuchsia-200">
-              <div class="text-[11px] text-fuchsia-700">Períodos</div>
-              <div class="font-semibold text-fuchsia-900">{{ totalPeriods }}</div>
-            </div>
-            <div class="bg-white/60 rounded px-2 py-1 border border-fuchsia-200">
-              <div class="text-[11px] text-fuchsia-700">Dias</div>
-              <div class="font-semibold text-fuchsia-900">{{ (props.eventDates?.length || 0) }}</div>
-            </div>
-          </div>
-          <div class="mt-2 text-[11px] text-fuchsia-700">
-            Horas/dia: {{ horasPorDiaEffective }}h • Escala: {{ escalaHorasEffective }}h
-            <span v-if="props.resumoOperacao?.temPausa1h">• Pausa 1h</span>
-            <span v-if="props.resumoOperacao?.temHoraExtra">• Hora extra</span>
-          </div>
-        </div>
-
-        <!-- <div class="text-[11px] text-slate-600 mt-2">
-            <strong>Regras de preço:</strong> Dias úteis (base) • Fins de semana (+40%) • Feriados (+60%)
-          </div> -->
-      </div>
+        <aside class="md:w-[40%] space-y-3 card p-4">
+        <h3 class="text-lg font-semibold text-gray-900 mb-4">Resumo da Operação</h3>
+          <!-- Resumo do evento -->
+          <ul class="text-sm divide-y divide-slate-100">
+            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Nome do Evento</span><span class="font-medium text-right">{{ eventoNome || '—' }}</span></li>
+            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Cliente</span><span class="font-medium text-right">{{ clienteNome || '—' }}</span></li>
+            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Local do Evento</span><span class="font-medium text-right">{{ localNome || '—' }}</span></li>
+            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Total de Dias de Evento</span><span class="font-medium text-right">{{ totalDiasEvento }}</span></li>
+            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Total de Turnos</span><span class="font-medium text-right">{{ totalTurnosEvento }}</span></li>
+            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Total de Período</span><span class="font-medium text-right">{{ totalPeriods }}</span></li>
+            
+            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Total de Convidados</span><span class="font-medium text-right">{{ guests }}</span></li>
+            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Segmento do Evento</span><span class="font-medium text-right">{{ segmento || '—' }}</span></li>
+            <li class="py-1.5 flex items-start justify-between gap-4">
+              <span class="text-slate-600">Serviços Selecionados</span>
+              <span class="font-medium text-right">
+                <template v-if="(selectedServiceLabels || []).length">
+                  <span class="inline-flex flex-wrap gap-1 justify-end">
+                    <span v-for="s in selectedServiceLabels" :key="s" class="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-800 border border-indigo-200">{{ s }}</span>
+                  </span>
+                </template>
+                <template v-else>—</template>
+              </span>
+            </li>
+            
+            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Tipo de Escala</span><span class="font-medium text-right">{{ labelTipoEscala }}</span></li>
+            <li class="py-1.5 flex items-start justify-between gap-4" v-if="tipoEscala === 'escala'"><span class="text-slate-600">Se for Escala, qual é a selecionada?</span><span class="font-medium text-right">{{ escalaHorasEffective }}h</span></li>
+            <li class="py-1.5 flex items-start justify-between gap-4">
+              <span class="text-slate-600">Hora Extra ou 1 h de pausa</span>
+              <span class="font-medium text-right">
+                <template v-if="resumoOperacao?.pausaInformada || resumoOperacao?.temPausa1h">
+                  Pausa 1h
+                </template>
+                <template v-else-if="resumoOperacao?.temHoraExtra">
+                  Hora extra
+                </template>
+                <template v-else>
+                  —
+                </template>
+              </span>
+            </li>
+            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Selecionou as funções por</span><span class="font-medium text-right">{{ modoEquipesLabel }}</span></li>
+            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Quantidade de Funções</span><span class="font-medium text-right">{{ cart.length }}</span></li>
+            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Total de Profissionais a serem recrutados</span><span class="font-medium text-right">{{ totalPlannedProfessionals }}</span></li>
+          </ul>
         </aside>
-        <main class="md:w-[60%]">
-
-      <div v-if="!cart.length"
-        class="grid place-items-center rounded-xl border border-dashed border-slate-300 p-6 text-slate-500">
-        <div class="text-center">
-          <div class="text-4xl mb-2">🛒</div>
-          <div class="font-medium mb-1">Carrinho vazio</div>
-          <div class="text-sm">Use <b>Gerar automático</b> ou clique no catálogo acima</div>
-          <div v-if="eventPeriods.length === 0" class="text-xs text-red-500 mt-2">
-            ⚠️ Configure as datas do evento primeiro
-          </div>
-        </div>
-      </div>
-      <div v-else>
-        <!-- Nova tabela por períodos -->
-        <div class="space-y-4">
-          <div v-for="cartItem in cart" :key="cartItem.key" class="border border-slate-200 rounded-xl overflow-hidden">
-            <!-- Cabeçalho da função -->
-            <div class="bg-slate-50 px-4 py-3 border-b border-slate-200 cursor-pointer"
-              @click="toggleOpen(cartItem.key)">
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-3">
-                  <span class="text-xl">{{ icon(cartItem.key) }}</span>
-                  <div>
-                    <div class="font-semibold text-slate-900">{{ label(cartItem.key) }}</div>
-                    <div class="text-sm text-slate-600">{{ cartItem.sector }}</div>
-                  </div>
-                </div>
-                <div class="flex items-center gap-4">
-                  <div class="hidden sm:flex items-center gap-4">
-                    <div class="text-right">
-                      <div class="text-[11px] text-slate-600 leading-none">Profissionais</div>
-                      <div class="text-sm font-semibold text-slate-900">{{ itemProfessionalsPlanned(cartItem) }}</div>
-                    </div>
-                    <div class="text-right">
-                      <div class="text-[11px] text-slate-600 leading-none">Dias • Turnos</div>
-                      <div class="text-sm font-semibold text-slate-900">{{ itemDaysCount(cartItem) }} • {{
-                        itemPeriodsCount(cartItem) }}</div>
-                    </div>
-                  </div>
-                  <div class="text-right">
-                    <div class="text-[11px] text-slate-600 leading-none">Subtotal</div>
-                    <div class="text-sm font-semibold text-slate-900">{{ money(itemSubtotal(cartItem)) }}</div>
-                  </div>
-                  <div class="text-slate-400">{{ isOpen(cartItem.key) ? '▾' : '▸' }}</div>
-                </div>
-              </div>
+        <main class="md:w-[60%] space-y-6 p-4 card ">
+        <h3 class="text-lg font-semibold text-gray-900 mb-4">Orçamento</h3>
+          <div v-if="!cart.length"
+            class="grid place-items-center rounded-xl border border-dashed border-slate-300 p-6 text-slate-500">
+            <div class="text-center">
+              <div class="text-4xl mb-2">🛒</div>
+              <div class="font-medium mb-1">Carrinho vazio</div>
             </div>
-
-            <!-- Períodos do evento -->
-            <div class="p-4" v-show="isOpen(cartItem.key)">
-              <div v-if="cartItem.assignments.length === 0" class="text-center py-4 text-slate-500">
-                <div class="text-sm">Nenhum período selecionado</div>
-                <button @click="addAllPeriods(cartItem.key)"
-                  class="mt-2 text-brand-600 hover:text-brand-800 text-sm underline">
-                  Adicionar todos os períodos
-                </button>
-              </div>
-
-              <div v-else class="space-y-2">
-                <div v-for="(assignment, idx) in cartItem.assignments" :key="`${assignment.date}-${assignment.period}`"
-                  class="flex items-center justify-between p-3 bg-slate-50 rounded-lg">
-                  <div class="flex-1">
-                    <div class="text-sm font-medium">{{ formatDate(assignment.date) }}</div>
-                    <div class="text-xs text-slate-600 capitalize">
-                      <template v-if="!assignment.isExtra">
-                        {{ assignment.period }} • {{ getDayType(assignment.date) === 'holiday' ? 'Feriado' :
-                          getDayType(assignment.date) === 'weekend' ? 'Fim de semana' : 'Dia útil' }}
-                      </template>
-                      <template v-else>
-                        Hora extra (1h)
-                      </template>
+          </div>
+          <div v-else>
+            <!-- Nova tabela por períodos -->
+            <div class="space-y-4">
+              <div v-for="cartItem in cart" :key="cartItem.key"
+                class="border border-slate-200 rounded-xl overflow-hidden">
+                <!-- Cabeçalho da função -->
+                <div class="bg-slate-50 px-4 py-3 border-b border-slate-200 cursor-pointer"
+                  @click="toggleOpen(cartItem.key)">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-3">
+                      <span class="text-xl">{{ icon(cartItem.key) }}</span>
+                      <div>
+                        <div class="font-semibold text-slate-900">{{ label(cartItem.key) }}</div>
+                        <div class="text-sm text-slate-600">{{ cartItem.sector }}</div>
+                      </div>
+                    </div>
+                    <div class="flex items-center gap-4">
+                      <div class="hidden sm:flex items-center gap-4">
+                        <div class="text-right">
+                          <div class="text-[11px] text-slate-600 leading-none">Profissionais</div>
+                          <div class="text-sm font-semibold text-slate-900">{{ itemProfessionalsPlanned(cartItem) }}
+                          </div>
+                        </div>
+                        <div class="text-right">
+                          <div class="text-[11px] text-slate-600 leading-none">Turnos</div>
+                          <div class="text-sm font-semibold text-slate-900">{{
+                            itemPeriodsCount(cartItem) }}</div>
+                        </div>
+                      </div>
+                      <div class="text-right">
+                        <div class="text-[11px] text-slate-600 leading-none">Subtotal</div>
+                        <div class="text-sm font-semibold text-slate-900">{{ money(itemSubtotal(cartItem)) }}</div>
+                      </div>
+                      <div class="text-slate-400">{{ isOpen(cartItem.key) ? '▾' : '▸' }}</div>
                     </div>
                   </div>
+                </div>
 
-                  <div class="flex items-center gap-3">
-                    <!-- Quantidade -->
-                    <div class="flex items-center gap-1">
-                      <button @click="assignment.qty = Math.max(0, assignment.qty - 1)"
-                        class="w-6 h-6 rounded bg-slate-200 hover:bg-slate-300 text-xs">−</button>
-                      <input v-model.number="assignment.qty" type="number" min="0"
-                        class="w-12 text-center text-xs border border-slate-300 rounded px-1 py-1">
-                      <button @click="assignment.qty++"
-                        class="w-6 h-6 rounded bg-slate-200 hover:bg-slate-300 text-xs">+</button>
-                    </div>
-
-                    <!-- Preço -->
-                    <div class="text-right min-w-[80px]">
-                      <div class="text-sm font-semibold">{{ money(assignment.price) }}</div>
-                      <div class="text-xs text-slate-500">por pessoa</div>
-                    </div>
-
-                    <!-- Subtotal -->
-                    <div class="text-right min-w-[80px]">
-                      <div class="text-sm font-bold text-brand-600">{{ money(assignment.qty * assignment.price) }}</div>
-                    </div>
-
-                    <!-- Remover período -->
-                    <button @click="removePeriod(cartItem.key, idx)"
-                      class="text-red-500 hover:text-red-700 w-6 h-6 rounded hover:bg-red-50">
-                      ×
+                <!-- Períodos do evento -->
+                <div class="p-4" v-show="isOpen(cartItem.key)">
+                  <div v-if="cartItem.assignments.length === 0" class="text-center py-4 text-slate-500">
+                    <div class="text-sm">Nenhum período selecionado</div>
+                    <button @click="addAllPeriods(cartItem.key)"
+                      class="mt-2 text-brand-600 hover:text-brand-800 text-sm underline">
+                      Adicionar todos os períodos
                     </button>
                   </div>
+
+                  <div v-else class="space-y-3">
+                    <div v-for="group in groupAssignmentsByDate(cartItem)" :key="group.date" class="space-y-2">
+                      <div class="text-xs font-semibold text-slate-700">{{ formatDate(group.date) }}</div>
+
+                      <div v-for="(assignment, idx) in group.entries" :key="`${assignment.date}-${assignment.period}`"
+                        class="flex items-center justify-between p-3 rounded-lg border"
+                        :class="assignment.isPausa ? 'bg-amber-50 border-amber-200' : (assignment.isExtra ? 'bg-fuchsia-50 border-fuchsia-200' : 'bg-slate-50 border-slate-200')">
+                        <div class="flex-1">
+                          <div class="text-xs text-slate-600 capitalize">
+                            <template v-if="assignment.isPausa">
+                              Pausa 1h
+                            </template>
+                            <template v-else-if="assignment.isExtra">
+                              Hora extra (1h)
+                            </template>
+                            <template v-else>
+                              {{ assignment.period }} • {{ getDayType(assignment.date) === 'holiday' ? 'Feriado' :
+                                getDayType(assignment.date) === 'weekend' ? 'Fim de semana' : 'Dia útil' }}
+                            </template>
+                          </div>
+                        </div>
+
+                        <div class="flex items-center gap-3">
+                          <div class="flex items-center gap-1" v-if="!assignment.isPausa">
+                            <button @click="assignment.qty = Math.max(0, assignment.qty - 1)"
+                              class="w-6 h-6 rounded bg-slate-200 hover:bg-slate-300 text-xs">−</button>
+                            <input v-model.number="assignment.qty" type="number" min="0"
+                              class="w-12 text-center text-xs border border-slate-300 rounded px-1 py-1">
+                            <button @click="assignment.qty++"
+                              class="w-6 h-6 rounded bg-slate-200 hover:bg-slate-300 text-xs">+</button>
+                          </div>
+
+                          <div class="text-right min-w-[80px]">
+                            <div v-if="assignment.isPausa" class="text-sm font-semibold">—</div>
+                            <div v-else class="text-sm font-semibold flex items-center gap-1">
+                              <span>{{ money(assignment.price) }}</span>
+                              <span class="cursor-help text-[10px] px-1 rounded bg-slate-200 text-slate-700" :title="formatBreakdown(cartItem.key, assignment)">i</span>
+                            </div>
+                            <div class="text-xs text-slate-500" v-if="!assignment.isPausa">por pessoa</div>
+                          </div>
+
+                          <div class="text-right min-w-[80px]">
+                            <div class="text-sm font-bold text-brand-600">{{ assignment.isPausa ? '—' : money(assignment.qty * assignment.price) }}
+                            </div>
+                          </div>
+
+                          <button v-if="!assignment.isPausa" @click="removePeriod(cartItem.key, idx)"
+                            class="text-red-500 hover:text-red-700 w-6 h-6 rounded hover:bg-red-50">
+                            ×
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+
                 </div>
               </div>
-
-
             </div>
           </div>
-        </div>
-      </div>
 
 
-      <!-- Card final com totais gerais -->
-      <div class="mt-6 p-4 bg-slate-50 border border-slate-200 rounded-xl">
-        <div class="flex items-center justify-between">
-          <div class="text-sm text-slate-600">Total de Profissionais</div>
-          <div class="text-base font-semibold text-slate-900">{{ totalPlannedProfessionals }}</div>
-        </div>
-        <div class="flex items-center justify-between mt-2">
-          <div class="text-sm text-slate-600">Total em reais</div>
-          <div class="text-lg font-bold text-brand-600">{{ money(total) }}</div>
-        </div>
-      </div>
+          <!-- Card final com totais gerais -->
+          <div class="mt-6 p-4 bg-slate-50 border border-slate-200 rounded-xl">
+            <div class="flex items-center justify-between">
+              <div class="text-sm text-slate-600">Total de Profissionais</div>
+              <div class="text-base font-semibold text-slate-900">{{ totalPlannedProfessionals }}</div>
+            </div>
+            <div class="flex items-center justify-between mt-2">
+              <div class="text-sm text-slate-600">Total em reais</div>
+              <div class="text-lg font-bold text-brand-600">{{ money(total) }}</div>
+            </div>
+          </div>
         </main>
       </div>
-      </div>
+    </div>
 
 
 

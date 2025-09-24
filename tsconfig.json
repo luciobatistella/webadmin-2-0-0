@@ -20,14 +20,15 @@
     "strict": true,
     "noImplicitAny": true,
     "jsx": "preserve",
-    "types": ["node", "vite/client"]
+  "types": ["node", "vite/client", "vitest/globals"]
   },
   "include": [
     "src/**/*.ts",
     "src/**/*.d.ts",
     "src/**/*.tsx",
     "src/**/*.vue",
-    "env.d.ts"
+    "env.d.ts",
+    "tests/**/*.ts"
   ]
 }
 

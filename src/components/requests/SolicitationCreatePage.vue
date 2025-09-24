@@ -4,7 +4,7 @@
 
     <header class="mb-6 flex items-center justify-between">
       <div class="flex items-center gap-3">
-        <h1 class="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">{{ eventoNome || 'Nova Solicitação' }}</h1>
+        <h1 class="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">{{ form.evento_nome || 'Nova Solicitação' }}</h1>
         <span class="bg-green-100 mt-1 text-green-800 text-xs font-medium me-2 px-2.5 py-0.5 rounded-sm dark:bg-green-900 dark:text-green-300">Criação</span>
       </div>
 
@@ -18,19 +18,20 @@
     <SolicitationWizard
       v-model="form"
       @complete="save"
-      @evento-nome-changed="eventoNome = $event"
+
     />
   </section>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import Breadcrumbs from '@/components/Breadcrumbs.vue'
 import SolicitationWizard from './SolicitationWizard.vue'
 
 const router = useRouter()
-const eventoNome = ref('')
+
+const STORAGE_KEY = 'solicitacoes:new:form:v1'
 
 function defaultNewSolic(){
   return {
@@ -57,6 +58,52 @@ function defaultNewSolic(){
   }
 }
 const form = ref<any>(defaultNewSolic())
+
+// Limpa rascunho ao abrir "Nova Solicitação" por navegação normal; restaura apenas em refresh
+onMounted(() => {
+  try {
+    let navType = 'navigate'
+    try {
+      const entries = (performance as any)?.getEntriesByType?.('navigation') || []
+      if (entries && entries.length) navType = entries[0].type || 'navigate'
+      else {
+        const legacy = (performance as any)?.navigation?.type
+        if (legacy === 1) navType = 'reload'
+        else if (legacy === 2) navType = 'back_forward'
+      }
+    } catch {}
+
+    const isReloadLike = navType === 'reload' || navType === 'back_forward'
+
+    if (!isReloadLike) {
+      // Nova abertura (clique no menu): limpar rascunhos para começar do zero
+      try { localStorage.removeItem(STORAGE_KEY) } catch {}
+      try { localStorage.removeItem('solicitacoes:new:step') } catch {}
+      try { localStorage.removeItem('solicitacoes:new:wizard:v1') } catch {}
+      form.value = defaultNewSolic()
+    } else {
+      // Refresh/back-forward: restaurar rascunho
+      const raw = localStorage.getItem(STORAGE_KEY)
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        if (parsed && typeof parsed === 'object') {
+          form.value = { ...defaultNewSolic(), ...parsed }
+        }
+      }
+    }
+  } catch {}
+})
+
+// Persistir no localStorage (debounce leve)
+let persistTimer: any = null
+watch(form, (v) => {
+  try {
+    if (persistTimer) clearTimeout(persistTimer)
+    persistTimer = setTimeout(() => {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(v))
+    }, 200)
+  } catch {}
+}, { deep: true })
 
 function fillSample(){
   form.value = {
@@ -93,6 +140,9 @@ function fillSample(){
 
 function save(){
   console.log('[Nova Solicitação] payload:', { ...form.value })
+  try { localStorage.removeItem(STORAGE_KEY) } catch {}
+  try { localStorage.removeItem('solicitacoes:new:step') } catch {}
+  try { localStorage.removeItem('solicitacoes:new:wizard:v1') } catch {}
   router.push({ name: 'solicitacoes' })
 }
 

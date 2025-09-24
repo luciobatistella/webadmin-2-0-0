@@ -49,18 +49,9 @@ async function loadClients() {
       categoria: client.categoria || 'Geral'
     }))
   } catch (error) {
-    console.error('Erro ao carregar clientes:', error)
-    // Fallback para dados mock em caso de erro
-    clients.value = [
-      { id: 'cli_001', nome: 'Google Brasil', email: 'eventos@google.com', categoria: 'Tecnologia' },
-      { id: 'cli_002', nome: 'Microsoft', email: 'events@microsoft.com', categoria: 'Tecnologia' },
-      { id: 'cli_003', nome: 'Banco Itaú', email: 'marketing@itau.com.br', categoria: 'Financeiro' },
-      { id: 'cli_004', nome: 'Petrobras', email: 'eventos@petrobras.com.br', categoria: 'Energia' },
-      { id: 'cli_005', nome: 'Vale', email: 'comunicacao@vale.com', categoria: 'Mineração' },
-      { id: 'cli_006', nome: 'Ambev', email: 'marketing@ambev.com.br', categoria: 'Bebidas' },
-      { id: 'cli_007', nome: 'JBS', email: 'eventos@jbs.com.br', categoria: 'Alimentos' },
-      { id: 'cli_008', nome: 'Bradesco', email: 'marketing@bradesco.com.br', categoria: 'Financeiro' }
-    ]
+    console.error('Erro ao carregar clientes (API):', error)
+    // Sem fallback: depender apenas da API
+    clients.value = []
   } finally {
     isLoading.value = false
   }

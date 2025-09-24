@@ -1,13 +1,35 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import {
+  CheckCircleIcon,
+  ExclamationCircleIcon,
+  UserIcon,
+  CalendarIcon,
+  BuildingOfficeIcon,
+  DocumentTextIcon,
+  Cog6ToothIcon,
+  ClipboardDocumentListIcon
+} from '@heroicons/vue/24/outline'
 
 export interface WizardStep {
   id: string
   title: string
   description?: string
-  icon?: string
+  icon?: keyof typeof heroIcons | string // string para retrocompatibilidade
   isValid?: boolean
   isOptional?: boolean
+}
+
+// Mapa de ícones disponíveis para os steps
+const heroIcons = {
+  check: CheckCircleIcon,
+  error: ExclamationCircleIcon,
+  user: UserIcon,
+  calendar: CalendarIcon,
+  company: BuildingOfficeIcon,
+  document: DocumentTextIcon,
+  config: Cog6ToothIcon,
+  list: ClipboardDocumentListIcon
 }
 
 const props = withDefaults(defineProps<{
@@ -89,6 +111,12 @@ function getStepStatus(index: number): 'completed' | 'current' | 'pending' | 'in
   return 'pending'
 }
 
+// Helper para retornar componente de ícone válido (opcional)
+function getHeroIcon(name?: string) {
+  if (!name) return null
+  return (heroIcons as any)[name] || null
+}
+
 // Funções para callbacks de transição
 function onEnter() {
   // Callback quando elemento entra na transição
@@ -99,6 +127,13 @@ function onLeave() {
   // Callback quando elemento sai da transição
   console.log('🔄 Saindo da etapa:', currentStep.value + 1)
 }
+
+// Detecção de plataforma para tooltips de atalho
+const isMac = computed(() => typeof navigator !== 'undefined' && /mac|darwin/i.test(navigator.userAgent))
+const modKeyLabel = computed(() => isMac.value ? '⌘' : 'Ctrl')
+function prevTitle(){ return `${modKeyLabel.value} + ←` }
+function nextTitle(){ return `${modKeyLabel.value} + →` }
+function skipTitle(){ return `Pular (${modKeyLabel.value} + →)` }
 </script>
 
 <template>
@@ -128,7 +163,7 @@ function onLeave() {
           >
             <!-- Step Icon/Number -->
             <div
-              class="flex items-center justify-center w-8 h-8 rounded-full border-2 text-sm font-medium transition-all duration-300 transform"
+              class="flex items-center justify-center w-8 h-8 rounded-full border-2 text-sm font-medium transition-all duration-300 transform shrink-0"
               :class="{
                 'border-brand-600 bg-brand-600 text-white scale-110': getStepStatus(index) === 'current',
                 'border-green-600 bg-green-600 text-white scale-105': getStepStatus(index) === 'completed',
@@ -137,10 +172,15 @@ function onLeave() {
                 'border-red-600 bg-red-600 text-white animate-pulse': getStepStatus(index) === 'invalid'
               }"
             >
-              <span v-if="step.icon && getStepStatus(index) !== 'completed'" v-html="step.icon"></span>
-              <svg v-else-if="getStepStatus(index) === 'completed'" class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
-              </svg>
+              <!-- Ícone do step -->
+              <component
+                v-if="step.icon && getStepStatus(index) !== 'completed' && heroIcons[step.icon as keyof typeof heroIcons]"
+                :is="heroIcons[step.icon as keyof typeof heroIcons]"
+                class="w-4 h-4"
+              />
+              <!-- Ícone concluído -->
+              <CheckCircleIcon v-else-if="getStepStatus(index) === 'completed'" class="w-4 h-4" />
+              <!-- Fallback: número -->
               <span v-else>{{ index + 1 }}</span>
             </div>
 
@@ -203,6 +243,7 @@ function onLeave() {
             type="button"
             @click="prevStep"
             class="btn-secondary"
+            :title="prevTitle()"
           >
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
@@ -216,6 +257,7 @@ function onLeave() {
           type="button"
           @click="nextStep"
           class="btn-secondary"
+          :title="skipTitle()"
         >
           <span>Pular</span>
         </button>
@@ -228,8 +270,16 @@ function onLeave() {
             class="btn-primary"
             :class="isLastStep ? 'btn-success' : ''"
             :disabled="currentStepData?.isValid === false"
+            :title="isLastStep ? '' : nextTitle()"
           >
-            <span>{{ isLastStep ? 'Finalizar' : 'Próximo' }}</span>
+            <template v-if="isLastStep">
+              <span>Finalizar</span>
+            </template>
+            <template v-else>
+              <span class="flex items-center gap-2">
+                <span>Próximo</span>                
+              </span>
+            </template>
             <svg v-if="!isLastStep" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
             </svg>

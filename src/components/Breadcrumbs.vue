@@ -6,12 +6,19 @@ const route = useRoute()
 const router = useRouter()
 
 const crumbs = computed(() => {
-  const list = []
+  const list: Array<{ label: string; to?: any }> = []
   // Dashboard como raiz
   if (route.name !== 'dashboard') {
     list.push({ label: 'Dashboard', to: { name: 'dashboard' } })
   } else {
     list.push({ label: 'Dashboard' })
+  }
+  // Intermediários conhecidos
+  if (route.name === 'request-new') {
+    list.push({ label: 'Solicitações', to: { name: 'solicitacoes' } })
+  }
+  if (route.name === 'client-detail' || route.name === 'client-new') {
+    list.push({ label: 'Clientes', to: { name: 'clients' } })
   }
   const label = route.meta?.breadcrumb || route.meta?.title
   if (label && route.name !== 'dashboard') list.push({ label })

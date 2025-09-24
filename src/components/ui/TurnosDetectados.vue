@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import TurnosResumoOperacao from '@/components/ui/TurnosResumoOperacao.vue'
 
 export interface Turno {
   nome: string
@@ -19,6 +20,7 @@ interface ResumoOperacao {
   temPausa1h: boolean
   pausaInformada: boolean
   escalaHoras: number | null
+  colaboradoresPorDia: number
   temHoraExtra: boolean
   temFimDeSemana: boolean
   diasFimDeSemana: number
@@ -39,6 +41,7 @@ const props = defineProps<{
   estrategiaTurnos: boolean
   resumo?: ResumoOperacao | null
   tipoEscala?: 'hora' | 'diaria' | 'escala'
+  pausaInformada?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -119,6 +122,10 @@ function humanDuration(mins: number): string {
   return `${h}h ${m}min`
 }
 
+function isTurnoMadrugada(t: Turno): boolean {
+  return /madrugada/i.test(t?.nome || '')
+}
+
 function turnoMinutes(t: Turno): number {
   // Prefer absolutes when provided
   if (typeof t.inicioAbs === 'number' && typeof t.fimAbs === 'number') {
@@ -168,24 +175,9 @@ const turnosOrdenados = computed(() => {
 })
 
 // Interseção em minutos entre dois intervalos [a1,a2) e [b1,b2)
-function overlap(a1:number,a2:number,b1:number,b2:number){
-  return Math.max(0, Math.min(a2, b2) - Math.max(a1, b1))
-}
 
-// Conta minutos noturnos (22:00–06:00) no intervalo [start,end)
-function countNightMinutes(start:number, end:number){
-  let total = 0
-  const baseDay = Math.floor(start / 1440) - 1
-  for (let d = baseDay; d <= baseDay + 2; d++) {
-    const night1Start = d*1440 + 22*60
-    const night1End   = d*1440 + 24*60
-    const night2Start = d*1440 + 0
-    const night2End   = d*1440 + 6*60
-    total += overlap(start,end, night1Start, night1End)
-    total += overlap(start,end, night2Start, night2End)
-  }
-  return total
-}
+
+
 
 
 // Computed para totais POR DIA (baseado no resumo do DateRangePicker)
@@ -271,35 +263,28 @@ const dailyExtraMinutes = computed(() => {
 // Lista de resumos por turno vinda do DateRangePicker
 const perTurnoResumo = computed(() => props.resumo?.perTurno || [])
 
-// Indicador de pausa diária (somente leitura, vindo do resumo)
-const temPausaLocal = computed(() => props.resumo?.temPausa1h === true)
-const pausaInformadaLocal = computed(() => props.resumo?.pausaInformada === true)
+
 function onTogglePausa(v:boolean){ emit('alterar-pausa', v) }
 
 // Contagem de turnos e média
-const turnosCountResumo = computed(() => {
-  const r = props.resumo
-  if (!r) return 0
-  // Em Hora/Diária, contar os turnos padronizados cobertos (manhã/tarde/noite/madrugada)
-  if ((props.tipoEscala || 'hora') !== 'escala') {
-    const t = r.tiposTurno || { manha:0, tarde:0, noite:0, madrugada:0 }
-    return (t.manha||0) + (t.tarde||0) + (t.noite||0) + (t.madrugada||0)
-  }
-  // Em Escala/Plantão, usar a contagem real dos blocos fatiados
-  return perTurnoResumo.value.length
-})
-const avgMinPorTurnoResumo = computed(() => {
-  const count = turnosCountResumo.value
-  const horasDia = props.resumo?.horasPorDia || 0
-  if (!count) return 0
-  return Math.round((horasDia * 60) / count)
-})
+
+
 
 // Total de turnos no período (dias x turnos/dia)
 const totalTurnosPeriodo = computed(() => {
   const dias = (props.datas || []).length
   const porDia = props.resumo?.quantidadeTurnos || 0
   return dias * porDia
+})
+
+// Equipes por dia conforme regra: proporcional às horas/dia e escala
+const equipesPorDia = computed(() => {
+  const r = props.resumo
+  if (!r) return 1
+  if (typeof r.colaboradoresPorDia === 'number' && r.colaboradoresPorDia > 0) return r.colaboradoresPorDia
+  const escala = r.escalaHoras || 8
+  const horas = r.horasPorDia || 0
+  return Math.max(1, Math.ceil(horas / escala))
 })
 
 
@@ -313,130 +298,15 @@ const showEstrategia = computed(() => {
 
 
 // --- Cálculo de custo: contagens por tipo de dia e noite/extras ---
-function nextDateStr(dateStr: string): string {
-  const d = new Date(dateStr + 'T00:00:00')
-  d.setDate(d.getDate() + 1)
-  return d.toISOString().slice(0, 10)
-}
+
 
 const countCurrentWeekend = computed(() => props.resumo?.diasFimDeSemana || 0)
 const countCurrentWeekday = computed(() => (props.datas || []).length - countCurrentWeekend.value)
-const countNextWeekend = computed(() => (props.datas || []).filter(d => isFimDeSemana(nextDateStr(d))).length)
-const countNextWeekday = computed(() => (props.datas || []).length - countNextWeekend.value)
 
-function breakdownTurnoAllocations(inicio: string, fim: string, capMinutes: number){
-  const s = stripPlus1dFlag(inicio)
-  const e = stripPlus1dFlag(fim)
-  let start = s.hh*60 + s.mm
-  let end = e.hh*60 + e.mm + (e.plus1d ? 1440 : 0)
-  if (!e.plus1d && end <= start) end += 1440
-  const total = end - start
-  const extra = Math.max(0, total - capMinutes)
-  const regularBoundary = end - extra
 
-  const seg1Start = start
-  const seg1End = Math.min(end, 1440)
-  const seg2Start = Math.max(1440, start)
-  const seg2End = end
 
-  function part(startA:number, endA:number){
-    let rd=0, rn=0, ed=0, en=0
-    if (endA > startA){
-      const rS = Math.max(startA, start)
-      const rE = Math.min(endA, regularBoundary)
-      if (rE > rS){
-        const n = countNightMinutes(rS, rE)
-        rn += n; rd += (rE - rS) - n
-      }
-      const eS = Math.max(startA, regularBoundary)
-      const eE = Math.min(endA, end)
-      if (eE > eS){
-        const n = countNightMinutes(eS, eE)
-        en += n; ed += (eE - eS) - n
-      }
-    }
-    return { rd, rn, ed, en }
-  }
 
-  const a = part(seg1Start, seg1End)
-  const b = seg2End > seg2Start ? part(seg2Start, seg2End) : { rd:0, rn:0, ed:0, en:0 }
-  return { seg1: a, seg2: b }
-}
 
-const perDayTypeMinutes = computed(() => {
-  const cap = Math.max(4, escalaLocal.value) * 60
-  let weekday = { regularDay:0, regularNight:0, extraDay:0, extraNight:0 }
-  let weekend = { regularDay:0, regularNight:0, extraDay:0, extraNight:0 }
-  for (const t of props.turnos || []){
-    const b = breakdownTurnoAllocations(t.inicio, t.fim, cap)
-    // seg1 pertence ao mesmo dia; seg2 pertence ao dia seguinte
-    weekend.regularDay += b.seg1.rd * countCurrentWeekend.value
-    weekend.regularNight += b.seg1.rn * countCurrentWeekend.value
-    weekend.extraDay += b.seg1.ed * countCurrentWeekend.value
-    weekend.extraNight += b.seg1.en * countCurrentWeekend.value
-
-    weekday.regularDay += b.seg1.rd * countCurrentWeekday.value
-    weekday.regularNight += b.seg1.rn * countCurrentWeekday.value
-    weekday.extraDay += b.seg1.ed * countCurrentWeekday.value
-    weekday.extraNight += b.seg1.en * countCurrentWeekday.value
-
-    weekend.regularDay += b.seg2.rd * countNextWeekend.value
-    weekend.regularNight += b.seg2.rn * countNextWeekend.value
-    weekend.extraDay += b.seg2.ed * countNextWeekend.value
-    weekend.extraNight += b.seg2.en * countNextWeekend.value
-
-    weekday.regularDay += b.seg2.rd * countNextWeekday.value
-    weekday.regularNight += b.seg2.rn * countNextWeekday.value
-    weekday.extraDay += b.seg2.ed * countNextWeekday.value
-    weekday.extraNight += b.seg2.en * countNextWeekday.value
-  }
-  return { weekday, weekend }
-})
-
-// Opções de custo
-const baseRate = ref<number>(0)
-const optReduceNight = ref<boolean>(true)
-const pctNight = ref<number>(0)
-const pctWeekend = ref<number>(0)
-const pctExtraDay = ref<number>(0)
-const pctExtraNight = ref<number>(0)
-
-function currencyBRL(v:number){
-  try { return new Intl.NumberFormat('pt-BR', { style:'currency', currency:'BRL' }).format(v || 0) } catch { return `R$ ${ (v||0).toFixed(2) }` }
-}
-
-const costSummary = computed(() => {
-  const m = perDayTypeMinutes.value
-  const red = optReduceNight.value ? (60/52.5) : 1
-  // Horas pagas por bucket
-  const wdRegDayH = m.weekday.regularDay / 60
-  const wdRegNightH = (m.weekday.regularNight / 60) * red
-  const wdExtDayH = m.weekday.extraDay / 60
-  const wdExtNightH = (m.weekday.extraNight / 60) * red
-
-  const weRegDayH = m.weekend.regularDay / 60
-  const weRegNightH = (m.weekend.regularNight / 60) * red
-  const weExtDayH = m.weekend.extraDay / 60
-  const weExtNightH = (m.weekend.extraNight / 60) * red
-
-  const paidNightH = wdRegNightH + wdExtNightH + weRegNightH + weExtNightH
-  const paidWeekendH = weRegDayH + weRegNightH + weExtDayH + weExtNightH
-  const paidExtraDayH = wdExtDayH + weExtDayH
-  const paidExtraNightH = wdExtNightH + weExtNightH
-
-  const totalPaidH = wdRegDayH + wdRegNightH + wdExtDayH + wdExtNightH + weRegDayH + weRegNightH + weExtDayH + weExtNightH
-
-  const rate = baseRate.value || 0
-  const base = rate * totalPaidH
-  const addNight = rate * paidNightH * (pctNight.value/100)
-  const addWeekend = rate * paidWeekendH * (pctWeekend.value/100)
-  const addExtraDay = rate * paidExtraDayH * (pctExtraDay.value/100)
-  const addExtraNight = rate * paidExtraNightH * (pctExtraNight.value/100)
-  const total = base + addNight + addWeekend + addExtraDay + addExtraNight
-
-  return { totalPaidH, base, addNight, addWeekend, addExtraDay, addExtraNight, total,
-           buckets:{ wdRegDayH, wdRegNightH, wdExtDayH, wdExtNightH, weRegDayH, weRegNightH, weExtDayH, weExtNightH } }
-})
 
 // Computed para opções de escala inteligentes (apenas escalas vantajosas)
 const escalaOptions = computed<number[]>(() => {
@@ -444,21 +314,8 @@ const escalaOptions = computed<number[]>(() => {
   const base = [4, 6, 8, 12]
   if (!dailyMins || dailyMins <= 0) return base
   const h = Math.floor(dailyMins / 60)
-
-  // Prioridade 1: Divisores exatos (sem hora extra)
-  const exact = base.filter(s => s <= h && (h % s === 0))
-
-  // Prioridade 2: Se há poucos divisores (≤1), adicionar escalas "próximas" que minimizam desperdício
-  if (exact.length <= 1) {
-    const efficient = base.filter(s => {
-      if (s > h) return false // não pode ser maior que o período
-      const waste = h % s // horas extras geradas
-      return waste <= 2 // aceita até 2h de extra
-    })
-    return efficient.length ? efficient : [4]
-  }
-
-  return exact
+  // Mostrar todas as escalas que cabem no total de horas do dia
+  return base.filter(s => s <= h)
 })
 
 // Garante que a escala selecionada esteja sempre entre as opções válidas
@@ -477,7 +334,7 @@ watch(escalaOptions, (opts) => {
 </script>
 
 <template>
-  <div v-if="(datas && datas.length) || (turnos && turnos.length)" class="card p-4 bg-green-50 border-green-200">
+  <div v-if="(datas && datas.length) || (turnos && turnos.length)" class="card p-4 bg-blue-50 border-blue-200">
     <div class="flex items-center justify-between mb-4">
       <h3 class="text-lg font-semibold text-gray-900">Turnos Detectados Automaticamente
         <span class="ml-2 align-middle inline-flex items-center px-2 py-0.5 rounded-full border border-gray-300 bg-white text-[10px] uppercase tracking-wide text-gray-600">resumo da operação</span>
@@ -488,12 +345,12 @@ watch(escalaOptions, (opts) => {
 
     <!-- Explicação da Estratégia -->
     <div v-if="showEstrategia" class="mb-4 p-3 rounded border"
-         :class="estrategiaTurnos ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'">
+         :class="estrategiaTurnos ? 'bg-blue-50 border-blue-200' : 'bg-orange-50 border-orange-200'">
       <div class="flex items-start gap-2">
         <span class="text-lg">{{ estrategiaTurnos ? '💰' : '👥' }}</span>
         <div class="text-sm">
           <div class="font-medium"
-               :class="estrategiaTurnos ? 'text-green-800' : 'text-orange-800'">
+               :class="estrategiaTurnos ? 'text-blue-800' : 'text-orange-800'">
             {{ estrategiaTurnos ? 'Minimizar Custos' : 'Minimizar Funcionários' }}
           </div>
           <div class="text-gray-600 mt-1">
@@ -513,7 +370,7 @@ watch(escalaOptions, (opts) => {
         <div
           v-for="(turno, index) in turnos"
           :key="index"
-          class="bg-white border border-green-200 rounded-lg p-4"
+          class="bg-white border border-blue-200 rounded-lg p-4"
         >
           <!-- Layout em duas colunas -->
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
@@ -554,61 +411,70 @@ watch(escalaOptions, (opts) => {
       <div class="space-y-4">
         <!-- Barra de controles (fora do card verde) -->
         <div class="flex items-center justify-between mb-3 gap-2 flex-wrap">
-          <div class="flex items-center gap-2 flex-wrap">
-            <!-- Tipo de Escala -->
-            <div class="inline-flex rounded-lg border border-green-300 overflow-hidden">
+          <div class="flex items-center gap-2 flex-wrap ">
+            <!-- Tipo de Escala + (quando Escala/Plantão) opções de escala ao lado -->
+            <div class="inline-flex items-center rounded-lg border border-blue-300 overflow-hidden flex items-center gap-1 pl-2 px-2.5 py-1.5">
               <button type="button"
                       class="px-2.5 py-1.5 text-[11px] border-r"
-                      :class="tipoEscalaLocal==='hora' ? 'bg-green-50 text-green-800 border-green-400' : 'bg-white text-green-700 border-green-300'"
+                      :class="tipoEscalaLocal==='hora' ? 'px-2 py-1 rounded-lg text-[11px] focus:outline-none bg-blue-600 text-white' : 'bg-white text-blue-700 border-blue-300'"
                       @click="onChangeTipo('hora')">
                 Hora Trabalhada
               </button>
               <button type="button"
                       class="px-2.5 py-1.5 text-[11px] border-r"
-                      :class="tipoEscalaLocal==='diaria' ? 'bg-green-50 text-green-800 border-green-400' : 'bg-white text-green-700 border-green-300'"
+                      :class="tipoEscalaLocal==='diaria' ? 'px-2 py-1 rounded-lg text-[11px] focus:outline-none bg-blue-600 text-white' : 'bg-white text-blue-700 border-blue-300'"
                       @click="onChangeTipo('diaria')">
                 Diária
               </button>
               <button type="button"
                       class="px-2.5 py-1.5 text-[11px]"
-                      :class="tipoEscalaLocal==='escala' ? 'bg-green-50 text-green-800 border-green-400' : 'bg-white text-green-700 border-green-300'"
+                      :class="tipoEscalaLocal==='escala' ? 'px-2 py-1 rounded-lg text-[11px] focus:outline-none bg-blue-600 text-white' : 'bg-white text-blue-700 border-blue-300'"
                       @click="onChangeTipo('escala')">
                 Escala/Plantão
               </button>
-            </div>
-
-            <!-- 1h Pausa como card selecionável -->
-            <button type="button"
-                    class="px-2.5 py-1.5 text-[11px] rounded-lg border"
-                    :class="pausaInformadaLocal ? 'border-green-500 bg-green-50 text-green-800' : 'border-green-300 bg-white text-green-700'"
-                    @click="onTogglePausa(!pausaInformadaLocal)"
-                    :aria-pressed="pausaInformadaLocal">
-              1h Pausa
-            </button>
-
-            <!-- Escalas (só quando tipo = Escala/Plantão) -->
-            <div v-if="tipoEscalaLocal==='escala' && escalaOptions.length" class="inline-flex items-center gap-2">
-              <div class="text-[11px] uppercase text-green-700">Escala</div>
-              <div class="inline-flex gap-1">
-                <button
-                  v-for="h in escalaOptions"
-                  :key="h"
-                  type="button"
-                  class="px-3 py-1.5 rounded-lg border text-[11px] focus:outline-none"
-                  :class="escalaLocal === h ? 'border-green-500 bg-green-50 text-green-800' : 'border-green-300 bg-white text-green-700 hover:border-green-400'"
-                  @click="onChangeEscala(h)"
-                  role="radio"
-                  :aria-checked="escalaLocal === h"
-                >
-                  {{ h }}h
-                </button>
+              <!-- Escalas agrupadas ao botão Escala/Plantão (sem label 'Escala' e sem bordas nos cards) -->
+              <div v-if="tipoEscalaLocal==='escala' && escalaOptions.length" class="flex items-center gap-1 ">
+                <div class="inline-flex gap-1 ">
+                  <button
+                    v-for="h in escalaOptions"
+                    :key="h"
+                    type="button"
+                    class="px-2 py-1 rounded-lg text-[11px] focus:outline-none"
+                    :class="escalaLocal === h ? 'bg-blue-600 text-white' : 'bg-white-100 text-blue-800 hover:bg-blue-200'"
+                    @click="onChangeEscala(h)"
+                    role="radio"
+                    :aria-checked="escalaLocal === h"
+                  >
+                    {{ h }}h
+                  </button>
+                </div>
               </div>
             </div>
+
+            <!-- Grupo: 1 Hora de Almoço / Hora Extra -->
+            <div class="inline-flex rounded-lg border border-blue-300 overflow-hidden  gap-1 pl-2 px-2.5 py-1.5" role="group" aria-label="Pausa ou Hora Extra">
+              <button type="button"
+                      class="px-2.5 py-1.5 text-[11px]"
+                      :class="props.pausaInformada ? 'px-2 py-1 rounded-lg text-[11px] focus:outline-none bg-blue-600 text-white' : 'bg-white text-blue-700 border-blue-300'"
+                      @click="onTogglePausa(true)"
+                      :aria-pressed="props.pausaInformada">
+                1 Hora de Almoço
+              </button>
+              <button type="button"
+                      class="px-2.5 py-1.5 text-[11px]"
+                      :class="! props.pausaInformada ? 'px-2 py-1 rounded-lg text-[11px] focus:outline-none bg-blue-600 text-white' : 'bg-white text-blue-700 border-blue-300'"
+                      @click="onTogglePausa(false)"
+                      :aria-pressed="!props.pausaInformada">
+                Hora Extra
+              </button>
+            </div>
+
+
           </div>
-          <button type="button" @click="showDebug = !showDebug" class="text-[11px] text-green-700 underline">Debug</button>
+          <button type="button" @click="showDebug = !showDebug" class="text-[11px] text-blue-700 underline">Debug</button>
         </div>
 
-        <div class="p-4 bg-green-100 border border-green-300 rounded">
+        <div class="p-4 bg-blue-100 border border-blue-300 rounded">
           <!-- Cabeçalho removido (controles movidos para fora do card verde) -->
           <div v-if="showDebug" class="mb-3">
             <pre class="text-[10px] leading-tight bg-white p-2 rounded border overflow-auto max-h-64">{{ debugDump }}</pre>
@@ -620,8 +486,8 @@ watch(escalaOptions, (opts) => {
             <div v-if="false" class="bg-white p-3 rounded border border-blue-200">
               <div class="text-xs text-blue-600 uppercase font-medium mb-2">Comparativo de Estratégias (estimativa)</div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-                <div class="p-2 rounded border border-green-200 bg-green-50">
-                  <div class="font-medium text-green-800">💰 Minimizar Custos</div>
+                <div class="p-2 rounded border border-blue-200 bg-blue-50">
+                  <div class="font-medium text-blue-800">💰 Minimizar Custos</div>
                   <div class="text-gray-700 mt-1">
                     Turnos/dia: <b>{{ Math.ceil(totalByType.totalMinutes / (escalaLocal * 60)) }}</b><br/>
                     Extras/dia: <b>0</b>
@@ -638,138 +504,69 @@ watch(escalaOptions, (opts) => {
               <div class="text-[11px] text-gray-500 mt-2">Valores aproximados para referência rápida.</div>
             </div>
 
-          <!-- Resumo da Operação - Cards lado a lado com badges -->
-          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-
-            <!-- PERÍODO -->
-            <div class="bg-white p-4 rounded-lg border border-green-200">
-              <div class="text-xs text-green-600 uppercase font-medium mb-3">PERÍODO</div>
-
-              <div class="flex flex-wrap gap-2">
-                <span v-if="countCurrentWeekday > 0" class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                  📅 {{ countCurrentWeekday }} {{ countCurrentWeekday === 1 ? 'dia útil' : 'dias úteis' }}
-                </span>
-                <span v-if="countCurrentWeekend > 0" class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
-                  {{ countCurrentWeekend }} {{ countCurrentWeekend === 1 ? 'fim de semana' : 'fins de semana' }}
-                </span>
-              </div>
-
-              <div v-if="resumo?.janelaInicioStr && resumo?.janelaFimStr" class="mt-2 flex flex-wrap gap-2">
-                <span
-                  v-for="(d, di) in datas"
-                  :key="'badge-dia-'+di"
-                  class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
-                  :class="isFimDeSemana(d) ? 'bg-orange-100 text-orange-800 border border-orange-200' : 'bg-gray-100 text-gray-800'"
-                  :title="isFimDeSemana(d) ? 'Fim de semana' : 'Dia útil'"
-                >
-                  {{ d.split('-').reverse().join('/') }} das {{ resumo.janelaInicioStr.slice(0,5) }} às {{ resumo.janelaFimStr.slice(0,5) }}
-                </span>
-              </div>
-            </div>
-
-            <!-- OPERAÇÃO DIÁRIA -->
-            <div class="bg-white p-3 rounded-lg border border-green-200">
-              <div class="text-xs text-green-600 uppercase font-medium mb-2">OPERAÇÃO DIÁRIA</div>
-              <div class="flex items-center gap-2 mb-2">
-                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                  ⏱️ {{ totalByType.horasTrabalho }}h trabalhadas por dia
-                </span>
-              </div>
-              <!-- <div class="text-xs text-gray-700 mb-2">
-                {{ turnosCountResumo }} {{ turnosCountResumo === 1 ? 'turno' : 'turnos' }}
-                <span v-if="temPausaLocal" class="text-orange-600"> • com 1h pausa obrigatória</span>
-              </div> -->
-              <div class="flex flex-wrap gap-2">
-
-                <!-- Cobertura por turnos padronizados (por dia) -->
-                <div v-if="resumo?.tiposTurno" class="mt-1 flex flex-wrap gap-2">
-                  <span v-if="resumo.tiposTurno.manha>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">🌅 Manhã: {{ humanDuration(horasPorTurnoDiario.manha) }}</span>
-                  <span v-if="resumo.tiposTurno.tarde>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">☀️ Tarde: {{ humanDuration(horasPorTurnoDiario.tarde) }}</span>
-                  <span v-if="resumo.tiposTurno.noite>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">🌙 Noite: {{ humanDuration(horasPorTurnoDiario.noite) }}</span>
-                  <span v-if="resumo.tiposTurno.madrugada>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">🌃 Madrugada: {{ humanDuration(horasPorTurnoDiario.madrugada) }}</span>
-
-                  <span v-if="dailyExtraMinutes > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-50 text-orange-700 border border-orange-200">
-                    ⚡ Hora extra: {{ humanDuration(dailyExtraMinutes) }}
-                  </span>
-
-                </div>
-
-                <!-- <span v-if="totalByType.normais > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                  {{ totalByType.horasTrabalho }}h normais
-                </span> -->
-                <span v-if="totalByType.noturnas > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
-                  {{ totalByType.noturnas }}h noturnas
-                </span>
-                <span v-if="totalByType.temPausa" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
-                  ⏰ 1h pausa
-                </span>
-              </div>
-            </div>
-
-            <!-- OPERAÇÃO TOTAL -->
-            <div class="bg-white p-3 rounded-lg border border-green-200">
-              <div class="text-xs text-green-600 uppercase font-medium mb-2">OPERAÇÃO TOTAL</div>
-              <div class="flex items-center gap-2 mb-2">
-                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                  🎯 {{ (resumo?.horasTotalPeriodo ?? 0).toFixed(0) }}h trabalhadas
-                </span>
-              </div>
-              <div class="flex items-center gap-2 mb-2">
-                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
-                  🧩 {{ totalTurnosPeriodo }} {{ totalTurnosPeriodo === 1 ? 'turno' : 'turnos' }} no período
-                </span>
-              </div>
-
-                <span v-if="dailyExtraMinutes > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-50 text-orange-700 border border-orange-200">
-                  ⚡ {{ humanDuration(dailyExtraMinutes * datas.length) }} extras no período
-                </span>
-
-              <!-- <div class="text-xs text-gray-600 mb-2">Para Cálculo (com adicionais):</div> -->
-              <!-- <div class="flex flex-wrap gap-2 mb-2">
-                <span v-if="totalByType.horasTrabalho > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                  {{ (totalByType.horasTrabalho * countCurrentWeekday).toFixed(0) }}h dia útil (100%)
-                </span>
-                <span v-if="totalByType.horasTrabalho > 0 && countCurrentWeekend > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
-                  {{ (totalByType.horasTrabalho * countCurrentWeekend).toFixed(0) }}h fim de semana (100% adicional)
-                </span>
-                <span v-if="totalByType.noturnas > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
-                  {{ (totalByType.noturnas * datas.length).toFixed(0) }}h noturnas
-                </span>
-              </div> -->
-              <!-- <div>
-                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-200 text-green-900">
-                  Total: {{ (resumo?.horasTotalPeriodo ?? 0).toFixed(0) }}h para pagamento
-                </span>
-              </div> -->
-            </div>
-          </div>
+          <!-- Resumo da Operação movido para componente TurnosResumoOperacao -->
+          <TurnosResumoOperacao
+            :resumo="resumo"
+            :datas="datas"
+            :total-by-type="totalByType"
+            :horas-por-turno-diario="horasPorTurnoDiario"
+            :daily-extra-minutes="dailyExtraMinutes"
+            :total-turnos-periodo="totalTurnosPeriodo"
+          />
 
 
         </div>
 
         <!-- Turnos por dia: 1 linha por dia com seus turnos -->
         <div class="space-y-2 mt-4">
-          <div v-for="(d, di) in datas" :key="'dia-'+d" class="flex gap-2 items-stretch w-full">
+          <div
+            v-for="(d, di) in datas"
+            :key="'dia-'+d"
+            class="flex gap-2 items-stretch w-full"
+            :class="isFimDeSemana(d) ? 'weekend-row' : ''"
+          >
             <!-- Card da data -->
-            <div class="flex-1 basis-0 bg-white border border-gray-200 rounded p-2">
-              <div class="font-semibold text-gray-900">Dia {{ di + 1 }}</div>
-              <div class="text-sm text-gray-600">{{ formatDateBR(d) }}</div>
+            <div
+              class="flex-1 basis-0 border rounded p-2"
+              :class="isFimDeSemana(d)
+                ? 'bg-orange-100 border-orange-300'
+                : 'bg-white border-gray-200'"
+            >
+              <div class="font-semibold text-gray-900 flex items-center gap-2">
+                <span>Dia {{ di + 1 }}</span>
+                <span v-if="isFimDeSemana(d)" class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-200 text-orange-900 uppercase tracking-wide">FDS</span>
+              </div>
+              <div class="text-sm" :class="isFimDeSemana(d) ? 'text-orange-800' : 'text-gray-600'">{{ formatDateBR(d) }}</div>
             </div>
             <!-- Cards dos turnos -->
             <div
               v-for="(t, i) in turnosOrdenados"
               :key="'dia-'+d+'-turno-'+i"
-              :class="t.isExtra
-                ? 'flex-1 basis-0 bg-orange-50 border border-orange-200 rounded p-2'
-                : (t.isPausa
-                  ? 'flex-1 basis-0 bg-yellow-50 border border-yellow-200 rounded p-2'
-                  : 'flex-1 basis-0 bg-white border border-gray-200 rounded p-2')"
+              :class="[
+                'flex-1 basis-0 rounded p-2 border',
+                t.isPausa
+                  ? (isFimDeSemana(d) ? 'bg-yellow-100 border-yellow-200' : 'bg-yellow-50 border-yellow-200')
+                  : t.isExtra
+                    ? (isFimDeSemana(d) ? 'bg-orange-200 border-orange-300' : 'bg-orange-50 border-orange-200')
+                    : (isTurnoMadrugada(t)
+                        ? (isFimDeSemana(d) ? 'bg-purple-200 border-purple-400' : 'bg-purple-50 border-purple-300')
+                        : (isFimDeSemana(d) ? 'bg-orange-100 border-orange-300' : 'bg-white border-gray-200'))
+              ]"
             >
               <div class="flex items-center justify-between font-semibold text-gray-900 leading-tight">
-                <span>{{ t.nome }}</span>
+                <span class="flex items-center gap-1">
+                  <span v-if="isTurnoMadrugada(t)" class="inline-flex items-center justify-center w-5 h-5 rounded-full text-[11px] font-bold bg-purple-600 text-white shadow-sm" title="Turno Madrugada">🌃</span>
+                  {{ t.nome }}
+                </span>
                 <span
-                  class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
-                  :class="t.isExtra ? 'bg-orange-100 text-orange-800' : (t.isPausa ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-700')"
+                  class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap"
+                  :class="t.isExtra
+                    ? 'bg-orange-100 text-orange-800'
+                    : (t.isPausa
+                        ? 'bg-yellow-100 text-yellow-800'
+                        : (isTurnoMadrugada(t)
+                            ? 'bg-purple-100 text-purple-800'
+                            : 'bg-gray-100 text-gray-700'))"
                 >
                   {{ humanDuration(turnoMinutes(t)) }}
                 </span>

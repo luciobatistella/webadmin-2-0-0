@@ -66,35 +66,10 @@ async function loadClientVenues(clientId: string) {
   }
 }
 
-// Dados mock para quando não há cliente selecionado
-const mockVenues: Venue[] = [
-  {
-    id: 'venue_001',
-    nome: 'Centro de Convenções Anhembi',
-    endereco: 'Av. Olavo Fontoura, 1209 - Santana, São Paulo - SP',
-    maps_url: 'https://maps.google.com/anhembi',
-    categoria: 'Centro de Convenções',
-    capacidade: 5000
-  },
-  {
-    id: 'venue_002',
-    nome: 'Espaço de Eventos Arca',
-    endereco: 'Rua Funchal, 573 - Vila Olímpia, São Paulo - SP',
-    categoria: 'Espaço de Eventos',
-    capacidade: 800
-  },
-  {
-    id: 'venue_003',
-    nome: 'Hotel Copacabana Palace',
-    endereco: 'Av. Atlântica, 1702 - Copacabana, Rio de Janeiro - RJ',
-    categoria: 'Hotel',
-    capacidade: 1200
-  }
-]
-
 const filteredVenues = computed(() => {
-  // Se há cliente selecionado, usa os locais do cliente, senão usa mock
-  const availableVenues = props.clientId ? venues.value : mockVenues
+  // Depender apenas da API: somente exibir locais carregados para o cliente selecionado
+  if (!props.clientId) return []
+  const availableVenues = venues.value
 
   if (!searchQuery.value) return availableVenues.slice(0, 6)
 
