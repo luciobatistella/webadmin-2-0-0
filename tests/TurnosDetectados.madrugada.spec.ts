@@ -4,7 +4,7 @@ import { mount } from '@vue/test-utils'
 import TurnosDetectados from '../src/components/ui/TurnosDetectados.vue'
 
 describe('TurnosDetectados - badge Madrugada', () => {
-  it('exibe destaque para turno de Madrugada', () => {
+  it('exibe Turno Madrugada sem ícone ou cor especial', () => {
     const wrapper = mount(TurnosDetectados, {
       props: {
         turnos: [
@@ -37,8 +37,8 @@ describe('TurnosDetectados - badge Madrugada', () => {
       }
     })
 
-    // Ícone/badge de madrugada
+    // Não deve ter destaque roxo nem ícone específico
     expect(wrapper.html()).toMatch(/Turno Madrugada/)
-    expect(wrapper.find('span.bg-purple-100, span.bg-purple-600').exists()).toBeTruthy()
+    expect(wrapper.find('span.bg-purple-100, span.bg-purple-600').exists()).toBeFalsy()
   })
 })

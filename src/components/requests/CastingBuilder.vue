@@ -105,6 +105,7 @@ const emit = defineEmits<{
   (e: 'update:equipes', v: EquipLine[]): void
   (e: 'update:taxaServicoPct', v: number): void
   (e: 'update:fixedCosts', v: number): void
+  (e: 'alterar-escala', v: number): void
 }>()
 
 // Debug helpers
@@ -247,9 +248,20 @@ interface CartLine {
   key: string
   sector: string
   assignments: PeriodAssignment[]
+  escala?: number
 }
 
 const cart = ref<CartLine[]>([])
+
+// Métricas agregadas para o resumo final (Step 4)
+const totalDiasEvento = computed(() => {
+  try { return new Set((eventPeriods.value || []).map(p => p.date)).size } catch { return 0 }
+})
+const totalPeriodosResumo = computed(() => (eventPeriods.value || []).length)
+const totalTurnosResumo = computed(() => {
+  try { return new Set((eventPeriods.value || []).map(p => p.period)).size } catch { return 0 }
+})
+const totalFuncoesResumo = computed(() => (cart.value || []).length)
 
 // Helpers para traduzir turnos (steps) em faixas de período
 function timeToMin(hhmm: string): number {
@@ -336,8 +348,8 @@ const formatDate = (dateStr: string): string => {
   })
 }
 
-// Store config role_rates
-const { ensureLoaded: ensureConfig, catalogRoles } = useAppConfig()
+// Store config role_rates, categorias e segmentos (para ícones coerentes com Steps anteriores)
+const { ensureLoaded: ensureConfig, catalogRoles, categorias, segmentos: segmentosEvento } = useAppConfig()
 // Sincroniza catálogo local com store quando carregar
 watch(catalogRoles, (v) => {
   try {
@@ -424,25 +436,41 @@ async function loadSettings() {
 const shiftWorkMinutes = computed(() => {
   try {
     const arr = shiftsDisplay.value || []
-    return arr.reduce((sum: number, t: any) => {
+    let minutes = arr.reduce((sum: number, t: any) => {
       if (t?.isPausa) return sum
       const s = typeof t?.inicioAbs === 'number' ? t.inicioAbs : timeToMin(t?.inicio || '00:00')
       const e = typeof t?.fimAbs === 'number' ? t.fimAbs : timeToMin(t?.fim || '00:00')
       return sum + Math.max(0, (e - s))
-
-
-
     }, 0)
+    // Se houver pausa de 1h selecionada, desconta 60 minutos do total trabalhado
+    const hasPause = !!(props.resumoOperacao?.pausaInformada || props.resumoOperacao?.temPausa1h)
+    if (hasPause) minutes = Math.max(0, minutes - 60)
+    return minutes
   } catch { return 0 }
 })
 const horasPorDiaEffective = computed(() => {
   if (props.resumoOperacao && typeof props.resumoOperacao.horasPorDia === 'number') return props.resumoOperacao.horasPorDia
-  return Math.round((shiftWorkMinutes.value / 60) * 100) / 100
+  const h = Math.round((shiftWorkMinutes.value / 60) * 100) / 100
+  return h > 0 ? h : 8
 })
 const escalaHorasEffective = computed(() => {
   if (props.resumoOperacao && typeof props.resumoOperacao.escalaHoras === 'number') return props.resumoOperacao.escalaHoras
   return 8
 })
+// Escala agora somente exibição no orçamento (sem dropdown por enquanto)
+function setEscalaHoras(_horas: number){ /* desativado */ }
+
+// Escala efetiva por item (fallback para a escala global)
+function escalaHorasFor(item: CartLine): number {
+  const h = Number(item?.escala ?? escalaHorasEffective.value ?? 0)
+  return Math.max(1, Math.round(h || 0))
+}
+
+// Define escala individual para um item do carrinho
+function setItemEscalaHoras(key: string, horas: number) {
+  const item = (cart.value || []).find(i => i.key === key)
+  if (item) item.escala = Math.max(1, Math.round(horas || 0))
+}
 
 
 // Rótulos auxiliares para o resumo
@@ -453,7 +481,6 @@ const labelTipoEscala = computed(() => {
     : '—'
 })
 const modoEquipesLabel = computed(() => props.modoEquipes === 'automatico' ? 'Automático' : props.modoEquipes === 'manual' ? 'Manual' : '—')
-const totalDiasEvento = computed(() => (props.eventDates?.length || 0))
 const totalTurnosEvento = computed(() => ((props.shifts || []).length))
 
 
@@ -497,6 +524,30 @@ const serviceIdToLabel: Record<string, string> = {
   estacionamento: 'Estacionamento'
 }
 const selectedServiceLabels = computed(() => (props.selectedServices || []).map(id => serviceIdToLabel[id] || id))
+// Detalhes dos serviços selecionados usando categorias carregadas (mantém consistência com Step 2)
+const selectedServicesDetailed = computed(() => {
+  const cats = (categorias?.value || []) as any[]
+  return (props.selectedServices || []).map(id => {
+    const cat = cats.find(c => c.id === id)
+    return {
+      id,
+      label: cat?.nome || serviceIdToLabel[id] || id,
+      icon: cat?.icon || '•'
+    }
+  })
+})
+
+// Segmento selecionado (nome + ícone) alinhado ao Step 2
+const selectedSegmento = computed(() => {
+  try {
+    const list = (segmentosEvento?.value || []) as any[]
+    const rawId = (props.segmento || '').trim()
+    if (!rawId) return null
+    const seg = list.find(s => s.id === rawId)
+    if (seg) return { id: seg.id, label: seg.nome || seg.id, icon: seg.icon || '' }
+    return { id: rawId, label: rawId, icon: '' }
+  } catch { return null }
+})
 
 
 // Funções para gerenciar o novo carrinho
@@ -573,12 +624,7 @@ const clearCart = () => {
 
 // Cálculos atualizados para nova estrutura
 const subtotal = computed(() => {
-  return cart.value.reduce((total, cartItem) => {
-    const itemTotal = cartItem.assignments.reduce((assignmentTotal, assignment) => {
-      return assignmentTotal + (assignment.qty * assignment.price)
-    }, 0)
-    return total + itemTotal
-  }, 0)
+  return cart.value.reduce((total, cartItem) => total + itemSubtotal(cartItem), 0)
 })
 
 const serviceFee = computed(() => subtotal.value * (feePct.value / 100))
@@ -588,8 +634,54 @@ const total = computed(() => subtotal.value + serviceFee.value + (fixed.value ||
 // Subtotal por item (função)
 const itemSubtotal = (item: CartLine) => {
   try {
-    return (item.assignments || []).reduce((acc, a) => acc + (Number(a.qty) || 0) * (Number(a.price) || 0), 0)
+    const byDate: Record<string, { maxQty: number; priceSum: number }> = {}
+    for (const a of (item.assignments || [])) {
+      if ((a as any).isPausa) continue
+      const d = a.date
+      if (!byDate[d]) byDate[d] = { maxQty: 0, priceSum: 0 }
+      byDate[d].maxQty = Math.max(byDate[d].maxQty, Number(a.qty) || 0)
+      byDate[d].priceSum += Number(a.price) || 0
+    }
+    const mult = perDateMultiplierFor(item)
+    return Object.values(byDate).reduce((sum, d) => sum + (d.maxQty * mult * d.priceSum), 0)
   } catch { return 0 }
+}
+
+// Cálculo de custo para um item dado uma escala específica (sem mutar o item)
+function costForItemWithEscala(item: CartLine, escalaHoras: number): number {
+  try {
+    const byDate: Record<string, { maxQty: number; priceSum: number }> = {}
+    for (const a of (item.assignments || [])) {
+      if ((a as any).isPausa) continue
+      const d = a.date
+      if (!byDate[d]) byDate[d] = { maxQty: 0, priceSum: 0 }
+      byDate[d].maxQty = Math.max(byDate[d].maxQty, Number(a.qty) || 0)
+      byDate[d].priceSum += Number(a.price) || 0
+    }
+    const hDia = Math.max(0, Number(horasPorDiaEffective.value || 0))
+    const mult = Math.max(1, Math.ceil(hDia / Math.max(1, Math.round(escalaHoras || 0))))
+    return Object.values(byDate).reduce((sum, d) => sum + (d.maxQty * mult * d.priceSum), 0)
+  } catch { return 0 }
+}
+
+// Seleciona a melhor escala (menor custo). Desempate: menor número de profissionais (maior escala)
+function pickBestEscalaForItem(item: CartLine): number {
+  const baseCandidates = [4, 6, 8, 12]
+  const candidates = Array.from(new Set([...baseCandidates]))
+  const hDia = Math.max(0, Number(horasPorDiaEffective.value || 0))
+  // 1) Prioriza cobrir as horas do dia com 1 profissional (escala >= horas do dia)
+  const covers = candidates.filter(e => e >= hDia)
+  if (covers.length) return Math.min(...covers)
+  // 2) Se não dá para cobrir com 1, minimize o número de profissionais (maior escala)
+  return Math.max(...candidates)
+}
+
+function optimizeCartEscalas() {
+  try {
+    (cart.value || []).forEach((it) => {
+      it.escala = pickBestEscalaForItem(it)
+    })
+  } catch {}
 }
 
 // Accordion por função
@@ -610,16 +702,31 @@ const itemPeriodsCount = (item: CartLine) => {
 
 // Profissionais ajustado à escala (evita duplicar por períodos do mesmo dia)
 const perDateMultiplier = computed(() => Math.max(1, Math.ceil((horasPorDiaEffective.value || 0) / Math.max(1, (escalaHorasEffective.value || 0)))))
+// Profissionais ajustado à escala (por item): usa escala do item ou a escala global
+function perDateMultiplierFor(item: CartLine): number {
+  const escalaH = Math.max(1, Math.round(Number(item.escala || escalaHorasEffective.value || 0)))
+  const hDia = Math.max(0, Number(horasPorDiaEffective.value || 0))
+  return Math.max(1, Math.ceil(hDia / Math.max(1, escalaH)))
+}
 function itemProfessionalsSmart(item: CartLine) {
   try {
+    // Headcount real: número de pessoas distintas necessárias simultaneamente no pico do dia
+    // NÃO multiplicar pelo perDateMultiplier (isso é para custo, não para contar pessoas únicas)
     const byDate: Record<string, number> = {}
     for (const a of (item.assignments || [])) {
+      if ((a as any).isPausa) continue
       const d = a.date
       const q = Number(a.qty) || 0
+      // Considera o maior qty entre períodos do mesmo dia (pico simultâneo)
       byDate[d] = Math.max(byDate[d] || 0, q)
     }
-    const mult = perDateMultiplier.value
-    return Object.values(byDate).reduce((sum, maxQ) => sum + (maxQ * mult), 0)
+    // Headcount do item = máximo pico entre os dias (ou soma)? Para total individuais usamos soma dos picos diários entre itens.
+    // Aqui devolvemos o maior pico diário deste item (não escalado). Cada item representa uma função.
+    let maxHeadcount = 0
+    for (const d of Object.keys(byDate)) {
+      maxHeadcount = Math.max(maxHeadcount, byDate[d] || 0)
+    }
+    return maxHeadcount
   } catch { return 0 }
 }
 const totalProfessionalsSmart = computed(() => (cart.value || []).reduce((acc, it) => acc + itemProfessionalsSmart(it), 0))
@@ -666,7 +773,7 @@ function seedFromEquipes() {
     const key = line.funcao_key
     const role = catalog.find(r => r.key === key)
     if (!role) return
-    const newItem: CartLine = { key, sector: role.sector, assignments: [] }
+    const newItem: CartLine = { key, sector: role.sector, assignments: [], escala: undefined }
     eventPeriods.value.forEach(period => {
       newItem.assignments.push({
         date: period.date,
@@ -735,7 +842,9 @@ function seedFromPlannedRoles() {
     }
     if (!role) return
 
-    const newItem: CartLine = { key: role.key, sector: role.sector, assignments: [] }
+    // Usa a escala planejada por função (Step-3) quando disponível
+    const escalaPlanned = Math.max(1, Math.round(Number((p as any)?.escala || 0))) || undefined
+    const newItem: CartLine = { key: role.key, sector: role.sector, assignments: [], escala: escalaPlanned }
     eventPeriods.value.forEach(period => {
       newItem.assignments.push({
         date: period.date,
@@ -824,13 +933,8 @@ function addWithQuantity(roleKey: string, quantity: number) {
     // Cria novo item no carrinho
     const role = catalog.find(r => r.key === roleKey)
     if (role) {
-      const newItem = {
-        key: roleKey,
-        sector: role.sector,
-        assignments: [] as PeriodAssignment[]
-      }
-
-      // Adiciona todos os períodos com a quantidade especificada
+      const newItem: CartLine = { key: roleKey, sector: role.sector, assignments: [], escala: undefined }
+      // Cria assignments normais para cada período
       eventPeriods.value.forEach(period => {
         newItem.assignments.push({
           date: period.date,
@@ -839,14 +943,13 @@ function addWithQuantity(roleKey: string, quantity: number) {
           price: calculatePrice(roleKey, period.date, period.period)
         })
       })
-      // Hora extra por data (somente exibição)
+      // Hora extra por data, se aplicável
       if (props.resumoOperacao?.temHoraExtra && !(props.resumoOperacao?.pausaInformada || props.resumoOperacao?.temPausa1h)) {
         const dates = Array.from(new Set(eventPeriods.value.map(p => p.date)))
         dates.forEach(date => {
           newItem.assignments.push({ date, period: 'extra', qty: quantity, price: calculatePrice(roleKey, date, 'extra'), isExtra: true })
         })
       }
-
       cart.value.push(newItem)
     }
   }
@@ -886,6 +989,9 @@ function runAuto() {
   if (isAllowed('seguranca')) addWithQuantity('seguranca', Math.max(2, ceilDiv(g, ratio.seguranca)) + 1)
   if (isAllowed('brigadista')) addWithQuantity('brigadista', 1)
   if (isAllowed('carregador')) addWithQuantity('carregador', 2)
+
+  // Otimiza escalas por item para menor custo possível
+  optimizeCartEscalas()
 }
 
 // Sincroniza carrinho -> equipes (payload)
@@ -1054,52 +1160,7 @@ watch([() => props.plannedRoles, eventPeriods], async () => {
       </details>
 
       <div class="md:flex md:gap-6">
-        <aside class="md:w-[40%] space-y-3 card p-4">
-        <h3 class="text-lg font-semibold text-gray-900 mb-4">Resumo da Operação</h3>
-          <!-- Resumo do evento -->
-          <ul class="text-sm divide-y divide-slate-100">
-            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Nome do Evento</span><span class="font-medium text-right">{{ eventoNome || '—' }}</span></li>
-            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Cliente</span><span class="font-medium text-right">{{ clienteNome || '—' }}</span></li>
-            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Local do Evento</span><span class="font-medium text-right">{{ localNome || '—' }}</span></li>
-            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Total de Dias de Evento</span><span class="font-medium text-right">{{ totalDiasEvento }}</span></li>
-            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Total de Turnos</span><span class="font-medium text-right">{{ totalTurnosEvento }}</span></li>
-            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Total de Período</span><span class="font-medium text-right">{{ totalPeriods }}</span></li>
-            
-            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Total de Convidados</span><span class="font-medium text-right">{{ guests }}</span></li>
-            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Segmento do Evento</span><span class="font-medium text-right">{{ segmento || '—' }}</span></li>
-            <li class="py-1.5 flex items-start justify-between gap-4">
-              <span class="text-slate-600">Serviços Selecionados</span>
-              <span class="font-medium text-right">
-                <template v-if="(selectedServiceLabels || []).length">
-                  <span class="inline-flex flex-wrap gap-1 justify-end">
-                    <span v-for="s in selectedServiceLabels" :key="s" class="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-800 border border-indigo-200">{{ s }}</span>
-                  </span>
-                </template>
-                <template v-else>—</template>
-              </span>
-            </li>
-            
-            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Tipo de Escala</span><span class="font-medium text-right">{{ labelTipoEscala }}</span></li>
-            <li class="py-1.5 flex items-start justify-between gap-4" v-if="tipoEscala === 'escala'"><span class="text-slate-600">Se for Escala, qual é a selecionada?</span><span class="font-medium text-right">{{ escalaHorasEffective }}h</span></li>
-            <li class="py-1.5 flex items-start justify-between gap-4">
-              <span class="text-slate-600">Hora Extra ou 1 h de pausa</span>
-              <span class="font-medium text-right">
-                <template v-if="resumoOperacao?.pausaInformada || resumoOperacao?.temPausa1h">
-                  Pausa 1h
-                </template>
-                <template v-else-if="resumoOperacao?.temHoraExtra">
-                  Hora extra
-                </template>
-                <template v-else>
-                  —
-                </template>
-              </span>
-            </li>
-            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Selecionou as funções por</span><span class="font-medium text-right">{{ modoEquipesLabel }}</span></li>
-            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Quantidade de Funções</span><span class="font-medium text-right">{{ cart.length }}</span></li>
-            <li class="py-1.5 flex items-start justify-between gap-4"><span class="text-slate-600">Total de Profissionais a serem recrutados</span><span class="font-medium text-right">{{ totalPlannedProfessionals }}</span></li>
-          </ul>
-        </aside>
+       
         <main class="md:w-[60%] space-y-6 p-4 card ">
         <h3 class="text-lg font-semibold text-gray-900 mb-4">Orçamento</h3>
           <div v-if="!cart.length"
@@ -1110,10 +1171,13 @@ watch([() => props.plannedRoles, eventPeriods], async () => {
             </div>
           </div>
           <div v-else>
+            <!-- Métricas resumidas (movidas do final) -->
+            
+
             <!-- Nova tabela por períodos -->
             <div class="space-y-4">
               <div v-for="cartItem in cart" :key="cartItem.key"
-                class="border border-slate-200 rounded-xl overflow-hidden">
+                class="border border-slate-200 rounded-xl">
                 <!-- Cabeçalho da função -->
                 <div class="bg-slate-50 px-4 py-3 border-b border-slate-200 cursor-pointer"
                   @click="toggleOpen(cartItem.key)">
@@ -1125,24 +1189,27 @@ watch([() => props.plannedRoles, eventPeriods], async () => {
                         <div class="text-sm text-slate-600">{{ cartItem.sector }}</div>
                       </div>
                     </div>
-                    <div class="flex items-center gap-4">
+                    <div class="flex items-center gap-4 relative">
                       <div class="hidden sm:flex items-center gap-4">
-                        <div class="text-right">
-                          <div class="text-[11px] text-slate-600 leading-none">Profissionais</div>
-                          <div class="text-sm font-semibold text-slate-900">{{ itemProfessionalsPlanned(cartItem) }}
-                          </div>
+                        <!-- Métricas padronizadas -->
+                        <div class="text-right w-20">
+                          <div class="text-[11px] text-slate-600 leading-none">Escala</div>
+                          <div class="text-sm font-semibold text-slate-900 tabular-nums">{{ escalaHorasFor(cartItem) }}h</div>
                         </div>
-                        <div class="text-right">
+                        <div class="text-right w-15">
+                          <div class="text-[11px] text-slate-600 leading-none">Cooperados</div>
+                          <div class="text-sm font-semibold text-slate-900 tabular-nums">{{ itemProfessionalsSmart(cartItem) }}</div>
+                        </div>
+                        <div class="text-right w-15">
                           <div class="text-[11px] text-slate-600 leading-none">Turnos</div>
-                          <div class="text-sm font-semibold text-slate-900">{{
-                            itemPeriodsCount(cartItem) }}</div>
+                          <div class="text-sm font-semibold text-slate-900 tabular-nums">{{ itemPeriodsCount(cartItem) }}</div>
+                        </div>
+                        <div class="text-right w-24">
+                          <div class="text-[11px] text-slate-600 leading-none">Subtotal</div>
+                          <div class="text-sm font-semibold text-slate-900 tabular-nums">{{ money(itemSubtotal(cartItem)) }}</div>
                         </div>
                       </div>
-                      <div class="text-right">
-                        <div class="text-[11px] text-slate-600 leading-none">Subtotal</div>
-                        <div class="text-sm font-semibold text-slate-900">{{ money(itemSubtotal(cartItem)) }}</div>
-                      </div>
-                      <div class="text-slate-400">{{ isOpen(cartItem.key) ? '▾' : '▸' }}</div>
+                      <div class="text-slate-400 ml-1">{{ isOpen(cartItem.key) ? '▾' : '▸' }}</div>
                     </div>
                   </div>
                 </div>
@@ -1217,20 +1284,94 @@ watch([() => props.plannedRoles, eventPeriods], async () => {
               </div>
             </div>
           </div>
-
-
-          <!-- Card final com totais gerais -->
-          <div class="mt-6 p-4 bg-slate-50 border border-slate-200 rounded-xl">
-            <div class="flex items-center justify-between">
-              <div class="text-sm text-slate-600">Total de Profissionais</div>
-              <div class="text-base font-semibold text-slate-900">{{ totalPlannedProfessionals }}</div>
-            </div>
-            <div class="flex items-center justify-between mt-2">
-              <div class="text-sm text-slate-600">Total em reais</div>
-              <div class="text-lg font-bold text-brand-600">{{ money(total) }}</div>
-            </div>
-          </div>
         </main>
+         <aside class="md:w-[40%] space-y-3 card p-4">
+          <h3 class="text-lg font-semibold text-gray-900 mb-3">Resumo da Operação</h3>
+          <!-- Grid de mini-cards -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <!-- Nome do Evento (linha única, ocupa toda a largura) -->
+            <div class="rounded-md border border-slate-200 bg-white/70 p-2 flex flex-col gap-0.5 col-span-1 sm:col-span-2">
+              <div class="text-[10px] uppercase tracking-wide text-slate-500 leading-none">Nome do Evento</div>
+              <div class="text-xs font-semibold text-slate-900 truncate" :title="eventoNome || '—'">{{ eventoNome || '—' }}</div>
+            </div>
+            <!-- Cliente + Local no mesmo card -->
+            <div class="rounded-md border border-slate-200 bg-white/70 p-2 flex flex-col gap-1 col-span-1 sm:col-span-2">
+              <div class="flex gap-4">
+                <div class="flex-1 min-w-0">
+                  <div class="text-[10px] uppercase tracking-wide text-slate-500 leading-none">Cliente</div>
+                  <div class="text-xs font-semibold text-slate-900 truncate" :title="clienteNome || '—'">{{ clienteNome || '—' }}</div>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="text-[10px] uppercase tracking-wide text-slate-500 leading-none">Local</div>
+                  <div class="text-xs font-semibold text-slate-900 truncate" :title="localNome || '—'">{{ localNome || '—' }}</div>
+                </div>
+              </div>
+            </div>
+            <!-- Dias / Turnos / Períodos / Convidados em quatro colunas -->
+            <div class="rounded-md border border-slate-200 bg-white/70 p-2 col-span-1 sm:col-span-2">
+              <div class="grid grid-cols-4 gap-2">
+                <div class="flex flex-col gap-0.5">
+                  <div class="text-[10px] uppercase tracking-wide text-slate-500 leading-none">Dias</div>
+                  <div class="text-xs font-semibold text-slate-900 tabular-nums">{{ totalDiasEvento }}</div>
+                </div>
+                <div class="flex flex-col gap-0.5">
+                  <div class="text-[10px] uppercase tracking-wide text-slate-500 leading-none">Total Turnos</div>
+                  <div class="text-xs font-semibold text-slate-900 tabular-nums">{{ totalTurnosResumo }}</div>
+                </div>
+                <div class="flex flex-col gap-0.5">
+                  <div class="text-[10px] uppercase tracking-wide text-slate-500 leading-none">Períodos</div>
+                  <div class="text-xs font-semibold text-slate-900 tabular-nums">{{ totalPeriods }}</div>
+                </div>
+                <div class="flex flex-col gap-0.5">
+                  <div class="text-[10px] uppercase tracking-wide text-slate-500 leading-none">Convidados</div>
+                  <div class="text-xs font-semibold text-slate-900 tabular-nums">{{ guests }}</div>
+                </div>
+              </div>
+            </div>
+            <div class="rounded-md border border-slate-200 bg-white/70 p-2 flex flex-col gap-0.5">
+              <div class="text-[10px] uppercase tracking-wide text-slate-500 leading-none">Segmento</div>
+              <div v-if="selectedSegmento" class="flex items-center gap-1.5 text-xs font-semibold text-slate-900 truncate" :title="selectedSegmento.label">
+                <span v-if="selectedSegmento.icon" class="text-sm leading-none">{{ selectedSegmento.icon }}</span>
+                <span class="truncate">{{ selectedSegmento.label }}</span>
+              </div>
+              <div v-else class="text-xs font-semibold text-slate-900">—</div>
+            </div>
+            <div class="rounded-md border border-slate-200 bg-white/70 p-2 flex flex-col gap-1">
+              <div class="text-[10px] uppercase tracking-wide text-slate-500 leading-none">Serviços Selecionados</div>
+              <div v-if="(selectedServicesDetailed || []).length" class="flex flex-col gap-1 mt-0.5">
+                <span v-for="s in selectedServicesDetailed" :key="s.id"
+                  class="flex items-center gap-2 px-3 py-1 rounded-md bg-slate-100/70 hover:bg-slate-200/70 transition-colors text-[11px] sm:text-xs leading-tight text-slate-700">
+                  <span class="text-sm leading-none">{{ s.icon }}</span>
+                  <span class="font-medium">{{ s.label }}</span>
+                </span>
+              </div>
+              <div class="text-xs font-semibold text-slate-900" v-else>—</div>
+            </div>
+           
+          </div>
+          <div class="mb-4 grid gap-2 grid-cols-2 sm:grid-cols-3">
+              <div class="p-2 rounded-md border border-slate-200 bg-white/70 flex flex-col gap-0.5">
+                <div class="text-[10px] uppercase tracking-wide text-slate-500 leading-none">Total de Cooperados</div>
+                <div class="text-sm font-semibold text-slate-900 tabular-nums">{{ totalProfessionalsSmart }}</div>
+              </div>
+              <div class="p-2 rounded-md border border-slate-200 bg-white/70 flex flex-col gap-0.5">
+                <div class="text-[10px] uppercase tracking-wide text-slate-500 leading-none">Total de Turnos</div>
+                <div class="text-sm font-semibold text-slate-900 tabular-nums">{{ totalPeriodosResumo }}</div>
+              </div>
+              <!-- <div class="p-2 rounded-md border border-slate-200 bg-white/70 flex flex-col gap-0.5">
+                <div class="text-[10px] uppercase tracking-wide text-slate-500 leading-none">Total Turnos</div>
+                <div class="text-sm font-semibold text-slate-900 tabular-nums"></div>
+              </div> -->
+              <div class="p-2 rounded-md border border-slate-200 bg-white/70 flex flex-col gap-0.5">
+                <div class="text-[10px] uppercase tracking-wide text-slate-500 leading-none">Total Funções</div>
+                <div class="text-sm font-semibold text-slate-900 tabular-nums">{{ totalFuncoesResumo }}</div>
+              </div>
+              <div class="p-2 rounded-md border border-emerald-300 bg-emerald-50 flex flex-col gap-0.5">
+                <div class="text-[10px] uppercase tracking-wide text-emerald-700 leading-none">Total (R$)</div>
+                <div class="text-sm font-bold text-emerald-900 tabular-nums">{{ money(total) }}</div>
+              </div>
+            </div>
+        </aside>
       </div>
     </div>
 
@@ -1247,4 +1388,6 @@ watch([() => props.plannedRoles, eventPeriods], async () => {
 .seg-on {
   @apply border-violet-600 bg-violet-600 text-white;
 }
+
+/* Mini cards resumo */
 </style>

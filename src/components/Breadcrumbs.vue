@@ -20,17 +20,29 @@ const crumbs = computed(() => {
   if (route.name === 'client-detail' || route.name === 'client-new') {
     list.push({ label: 'Clientes', to: { name: 'clients' } })
   }
-  const label = route.meta?.breadcrumb || route.meta?.title
+  if (route.name === 'cooperado-detail' || route.name === 'cooperado-new') {
+    // Preserva a query atual (vinda da lista) para manter busca/filtros ao clicar no breadcrumb
+    list.push({ label: 'Cooperados', to: { name: 'cooperados', query: { ...route.query } } })
+  }
+  const label = String(route.meta?.breadcrumb || route.meta?.title || '')
   if (label && route.name !== 'dashboard') list.push({ label })
   return list
 })
 
-const showBack = computed(() => route.name === 'client-detail' || route.name === 'client-new')
+const showBack = computed(() => (
+  route.name === 'client-detail' || route.name === 'client-new' ||
+  route.name === 'cooperado-detail' || route.name === 'cooperado-new'
+))
 
 function onBack() {
   // Regras de retorno
   if (route.name === 'client-detail' || route.name === 'client-new') {
     router.push({ name: 'clients' })
+    return
+  }
+  if (route.name === 'cooperado-detail' || route.name === 'cooperado-new') {
+    // Preservar a query (busca/filtros/página) ao voltar para a lista
+    router.push({ name: 'cooperados', query: { ...route.query } })
     return
   }
   if (window.history.length > 1) {

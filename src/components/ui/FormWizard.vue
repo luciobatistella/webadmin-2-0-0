@@ -359,7 +359,7 @@ function skipTitle(){ return `Pular (${modKeyLabel.value} + →)` }
 
 .step-content {
   position: relative;
-  overflow: hidden;
+  overflow: visible;
 }
 
 /* Indicadores de etapa */

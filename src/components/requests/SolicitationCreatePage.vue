@@ -61,37 +61,15 @@ const form = ref<any>(defaultNewSolic())
 
 // Limpa rascunho ao abrir "Nova Solicitação" por navegação normal; restaura apenas em refresh
 onMounted(() => {
-  try {
-    let navType = 'navigate'
-    try {
-      const entries = (performance as any)?.getEntriesByType?.('navigation') || []
-      if (entries && entries.length) navType = entries[0].type || 'navigate'
-      else {
-        const legacy = (performance as any)?.navigation?.type
-        if (legacy === 1) navType = 'reload'
-        else if (legacy === 2) navType = 'back_forward'
-      }
-    } catch {}
-
-    const isReloadLike = navType === 'reload' || navType === 'back_forward'
-
-    if (!isReloadLike) {
-      // Nova abertura (clique no menu): limpar rascunhos para começar do zero
-      try { localStorage.removeItem(STORAGE_KEY) } catch {}
-      try { localStorage.removeItem('solicitacoes:new:step') } catch {}
-      try { localStorage.removeItem('solicitacoes:new:wizard:v1') } catch {}
-      form.value = defaultNewSolic()
-    } else {
-      // Refresh/back-forward: restaurar rascunho
-      const raw = localStorage.getItem(STORAGE_KEY)
-      if (raw) {
-        const parsed = JSON.parse(raw)
-        if (parsed && typeof parsed === 'object') {
-          form.value = { ...defaultNewSolic(), ...parsed }
-        }
-      }
-    }
-  } catch {}
+  // Sempre limpar ao abrir /solicitacoes/new (acesso direto, navegação, refresh ou back/forward)
+  try { localStorage.removeItem(STORAGE_KEY) } catch {}
+  try { localStorage.removeItem('solicitacoes:new:step') } catch {}
+  try { localStorage.removeItem('solicitacoes:new:wizard:v1') } catch {}
+  try { localStorage.removeItem('evsp:lastDates') } catch {}
+  try { localStorage.removeItem('evsp:lastDateInput') } catch {}
+  try { localStorage.removeItem('evsp:lastBaseStartAbs') } catch {}
+  try { localStorage.removeItem('evsp:lastBaseEndAbs') } catch {}
+  form.value = defaultNewSolic()
 })
 
 // Persistir no localStorage (debounce leve)

@@ -35,14 +35,17 @@ interface ResumoOperacao {
   perTurno: { totalMinutes: number, hasExtra: boolean }[]
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   turnos: Turno[]
   datas: string[]
   estrategiaTurnos: boolean
   resumo?: ResumoOperacao | null
   tipoEscala?: 'hora' | 'diaria' | 'escala'
   pausaInformada?: boolean
-}>()
+  neutro?: boolean
+  baseStartAbs?: number | null
+  baseEndAbs?: number | null
+}>(), { neutro: true })
 
 const emit = defineEmits<{
   (e: 'recalcular-turnos'): void
@@ -174,6 +177,43 @@ const turnosOrdenados = computed(() => {
   return arr
 })
 
+// Lista exibida:
+// - Modo normal: usa ordenação base
+// - Modo neutro: remove pausas e mescla "Hora Extra" ao turno anterior contíguo
+const turnosExibidos = computed(() => {
+  const base = turnosOrdenados.value || []
+  if (!props.neutro) return base
+
+  const parseAbs = (s: string) => {
+    const p = stripPlus1dFlag(s)
+    return p.hh * 60 + p.mm + (p.days || 0) * 1440
+  }
+
+  const arr = base.filter(t => !t.isPausa)
+  const result: Turno[] = []
+  for (const t of arr) {
+    if (t.isExtra && result.length) {
+      const prev = result[result.length - 1]
+      const prevEnd = typeof prev.fimAbs === 'number' ? (prev.fimAbs as number) : parseAbs(prev.fim)
+      const curStart = typeof t.inicioAbs === 'number' ? (t.inicioAbs as number) : parseAbs(t.inicio)
+      // Se é contíguo ao anterior, estende o anterior
+      if (curStart === prevEnd) {
+        const newEndAbs = typeof t.fimAbs === 'number' ? (t.fimAbs as number) : parseAbs(t.fim)
+        prev.fimAbs = newEndAbs
+        // Reconstroi string fim preservando (+1d) quando necessário
+        const hh = Math.floor(newEndAbs / 60) % 24
+        const mm = newEndAbs % 60
+        const days = Math.floor(newEndAbs / 1440)
+        prev.fim = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}` + (days > 0 ? ' (+1d)' : '')
+        continue
+      }
+    }
+    // Caso contrário, adiciona o turno removendo a flag de extra (fica visualmente neutro)
+    result.push({ ...t, isExtra: undefined })
+  }
+  return result
+})
+
 // Interseção em minutos entre dois intervalos [a1,a2) e [b1,b2)
 
 
@@ -216,7 +256,7 @@ const horasPorTurnoDiario = computed(() => {
   if (e <= s) e += day
   const base = s - (s % day)
   const win = {
-    manha: { a: base + 9 * 60, b: base + 13 * 60 },
+    manha: { a: base + 6 * 60, b: base + 13 * 60 },
     tarde: { a: base + 13 * 60, b: base + 18 * 60 },
     noite: { a: base + 18 * 60, b: base + 24 * 60 },
     madrugada: { a: base + 24 * 60, b: base + 30 * 60 }
@@ -244,6 +284,64 @@ const horasPorTurnoDiario = computed(() => {
     mins.madrugada = sub(win.madrugada, mins.madrugada)
   }
   return mins
+})
+
+// Turnos neutros para exibição: recorta a janela diária em Manhã/Tarde/Noite/Madrugada
+const turnosNeutrosPorJanela = computed(() => {
+  const r = props.resumo
+  if (!props.neutro) return [] as Turno[]
+  // Preferir baseStart/baseEnd numéricos quando fornecidos; senão, strings do resumo
+  let haveNumeric = (typeof props.baseStartAbs === 'number' && typeof props.baseEndAbs === 'number')
+  let s: number, e: number
+  const day = 24 * 60
+  const parseHHMM = (ss: string) => {
+    const [hh, mm] = ss.slice(0, 5).split(':').map(x => parseInt(x, 10) || 0)
+    return hh * 60 + mm
+  }
+  if (haveNumeric) {
+    s = props.baseStartAbs as number
+    e = props.baseEndAbs as number
+    if (e <= s) e += day
+  } else {
+    if (!r || !r.janelaInicioStr || !r.janelaFimStr) return [] as Turno[]
+    s = parseHHMM(r.janelaInicioStr)
+    e = parseHHMM(r.janelaFimStr)
+    if (e <= s) e += day
+  }
+  const base = s - (s % day)
+  const wins = [
+    // Manhã expandida para cobrir 06:00–13:00 (inclui 06–09)
+    { key: 'manha', a: base + 6 * 60, b: base + 13 * 60, label: 'Turno Manhã' },
+    { key: 'tarde', a: base + 13 * 60, b: base + 18 * 60, label: 'Turno Tarde' },
+    { key: 'noite', a: base + 18 * 60, b: base + 24 * 60, label: 'Turno Noite' },
+    { key: 'madrugada', a: base + 24 * 60, b: base + 30 * 60, label: 'Turno Madrugada' }
+  ]
+  const out: Turno[] = []
+  const fmt = (abs: number) => {
+    const day = 24 * 60
+    const days = Math.floor(abs / day)
+    const mod = abs % day
+    if (mod === 0 && abs > 0) return '24:00' // exatamente meia-noite do mesmo dia
+    const hh = String(Math.floor(mod / 60)).padStart(2, '0')
+    const mm = String(mod % 60).padStart(2, '0')
+    const plus = days > 0 && mod !== 0 ? ' (+1d)' : ''
+    return `${hh}:${mm}${plus}`
+  }
+  for (const w of wins) {
+    const a = Math.max(s, w.a)
+    const b = Math.min(e, w.b)
+    if (b > a) {
+      out.push({ nome: w.label, inicio: fmt(a), fim: fmt(b), inicioAbs: a, fimAbs: b })
+    }
+  }
+  return out
+})
+
+// Escolha final para renderização
+const turnosParaMostrar = computed(() => {
+  if (!props.neutro) return turnosExibidos.value
+  const neutros = turnosNeutrosPorJanela.value
+  return (neutros && neutros.length) ? neutros : turnosExibidos.value
 })
 
 
@@ -337,7 +435,7 @@ watch(escalaOptions, (opts) => {
   <div v-if="(datas && datas.length) || (turnos && turnos.length)" class="card p-4 bg-blue-50 border-blue-200">
     <div class="flex items-center justify-between mb-4">
       <h3 class="text-lg font-semibold text-gray-900">Turnos Detectados Automaticamente
-        <span class="ml-2 align-middle inline-flex items-center px-2 py-0.5 rounded-full border border-gray-300 bg-white text-[10px] uppercase tracking-wide text-gray-600">resumo da operação</span>
+        <!-- <span class="ml-2 align-middle inline-flex items-center px-2 py-0.5 rounded-full border border-gray-300 bg-white text-[10px] uppercase tracking-wide text-gray-600">resumo da operação</span> -->
       </h3>
 
 
@@ -381,7 +479,6 @@ watch(escalaOptions, (opts) => {
               <span v-else-if="turno.nome.includes('Manhã')" class="text-yellow-500 text-xl">🌅</span>
               <span v-else-if="turno.nome.includes('Tarde')" class="text-orange-500 text-xl">☀️</span>
               <span v-else-if="turno.nome.includes('Noite')" class="text-blue-500 text-xl">🌙</span>
-              <span v-else-if="turno.nome.includes('Madrugada')" class="text-purple-500 text-xl">🌃</span>
               <span v-else class="text-gray-500 text-xl">⏰</span>
 
               <div>
@@ -410,7 +507,7 @@ watch(escalaOptions, (opts) => {
       <!-- Coluna Direita: Resumo da Operação -->
       <div class="space-y-4">
         <!-- Barra de controles (fora do card verde) -->
-        <div class="flex items-center justify-between mb-3 gap-2 flex-wrap">
+  <div v-if="!neutro" class="flex items-center justify-between mb-3 gap-2 flex-wrap">
           <div class="flex items-center gap-2 flex-wrap ">
             <!-- Tipo de Escala + (quando Escala/Plantão) opções de escala ao lado -->
             <div class="inline-flex items-center rounded-lg border border-blue-300 overflow-hidden flex items-center gap-1 pl-2 px-2.5 py-1.5">
@@ -474,7 +571,7 @@ watch(escalaOptions, (opts) => {
           <button type="button" @click="showDebug = !showDebug" class="text-[11px] text-blue-700 underline">Debug</button>
         </div>
 
-        <div class="p-4 bg-blue-100 border border-blue-300 rounded">
+  <div v-if="!neutro" class="p-4 bg-blue-100 border border-blue-300 rounded">
           <!-- Cabeçalho removido (controles movidos para fora do card verde) -->
           <div v-if="showDebug" class="mb-3">
             <pre class="text-[10px] leading-tight bg-white p-2 rounded border overflow-auto max-h-64">{{ debugDump }}</pre>
@@ -518,60 +615,55 @@ watch(escalaOptions, (opts) => {
         </div>
 
         <!-- Turnos por dia: 1 linha por dia com seus turnos -->
-        <div class="space-y-2 mt-4">
+  <div class="space-y-2 mt-4">
           <div
             v-for="(d, di) in datas"
             :key="'dia-'+d"
-            class="flex gap-2 items-stretch w-full"
+            class="w-full space-y-2"
             :class="isFimDeSemana(d) ? 'weekend-row' : ''"
           >
-            <!-- Card da data -->
+            <!-- Card do dia em linha própria -->
             <div
-              class="flex-1 basis-0 border rounded p-2"
+              class="w-full bg-blue-5 p-2 border rounded-sm"
               :class="isFimDeSemana(d)
                 ? 'bg-orange-100 border-orange-300'
-                : 'bg-white border-gray-200'"
+                : 'bg-blue-100 border-gray-200'"
             >
-              <div class="font-semibold text-gray-900 flex items-center gap-2">
-                <span>Dia {{ di + 1 }}</span>
+              <div class="flex items-center gap-2 whitespace-nowrap">
+                <span class="font-semibold text-gray-900 text-sm">Dia {{ di + 1 }}</span>
                 <span v-if="isFimDeSemana(d)" class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-200 text-orange-900 uppercase tracking-wide">FDS</span>
+                <span class="text-sm font-normal" :class="isFimDeSemana(d) ? 'text-orange-800' : 'text-gray-600'">— {{ formatDateBR(d) }}</span>
               </div>
-              <div class="text-sm" :class="isFimDeSemana(d) ? 'text-orange-800' : 'text-gray-600'">{{ formatDateBR(d) }}</div>
             </div>
-            <!-- Cards dos turnos -->
-            <div
-              v-for="(t, i) in turnosOrdenados"
-              :key="'dia-'+d+'-turno-'+i"
-              :class="[
-                'flex-1 basis-0 rounded p-2 border',
-                t.isPausa
-                  ? (isFimDeSemana(d) ? 'bg-yellow-100 border-yellow-200' : 'bg-yellow-50 border-yellow-200')
-                  : t.isExtra
-                    ? (isFimDeSemana(d) ? 'bg-orange-200 border-orange-300' : 'bg-orange-50 border-orange-200')
-                    : (isTurnoMadrugada(t)
-                        ? (isFimDeSemana(d) ? 'bg-purple-200 border-purple-400' : 'bg-purple-50 border-purple-300')
-                        : (isFimDeSemana(d) ? 'bg-orange-100 border-orange-300' : 'bg-white border-gray-200'))
-              ]"
-            >
-              <div class="flex items-center justify-between font-semibold text-gray-900 leading-tight">
-                <span class="flex items-center gap-1">
-                  <span v-if="isTurnoMadrugada(t)" class="inline-flex items-center justify-center w-5 h-5 rounded-full text-[11px] font-bold bg-purple-600 text-white shadow-sm" title="Turno Madrugada">🌃</span>
-                  {{ t.nome }}
-                </span>
-                <span
-                  class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap"
-                  :class="t.isExtra
-                    ? 'bg-orange-100 text-orange-800'
-                    : (t.isPausa
-                        ? 'bg-yellow-100 text-yellow-800'
-                        : (isTurnoMadrugada(t)
-                            ? 'bg-purple-100 text-purple-800'
-                            : 'bg-gray-100 text-gray-700'))"
-                >
-                  {{ humanDuration(turnoMinutes(t)) }}
-                </span>
+            <!-- Linha dos turnos abaixo -->
+            <div class="flex gap-2 w-full">
+              <div
+                v-for="(t, i) in turnosParaMostrar"
+                :key="'dia-'+d+'-turno-'+i"
+                :class="[
+                  'flex-1 basis-0 rounded p-2 border',
+                  t.isPausa
+                    ? (isFimDeSemana(d) ? 'bg-yellow-100 border-yellow-200' : 'bg-yellow-50 border-yellow-200')
+                    : t.isExtra
+                      ? (isFimDeSemana(d) ? 'bg-orange-200 border-orange-300' : 'bg-orange-50 border-orange-200')
+                      : (isFimDeSemana(d) ? 'bg-orange-100 border-orange-300' : 'bg-white border-gray-200')
+                ]"
+              >
+                <div class="flex items-center justify-between font-semibold text-gray-900 leading-tight">
+                  <span class="flex items-center gap-1">{{ t.nome }}</span>
+                  <span
+                    class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap"
+                    :class="t.isExtra
+                      ? 'bg-orange-100 text-orange-800'
+                      : (t.isPausa
+                          ? 'bg-yellow-100 text-yellow-800'
+                          : (isFimDeSemana(d) ? 'bg-orange-200 text-orange-900' : 'bg-gray-100 text-gray-700'))"
+                  >
+                    {{ humanDuration(turnoMinutes(t)) }}
+                  </span>
+                </div>
+                <div class="text-sm text-gray-600 leading-tight">{{ t.inicio }} - {{ t.fim }}</div>
               </div>
-              <div class="text-sm text-gray-600 leading-tight">{{ t.inicio }} - {{ t.fim }}</div>
             </div>
           </div>
         </div>

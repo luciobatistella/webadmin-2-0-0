@@ -6,7 +6,7 @@ export async function loadPublicConfig(): Promise<any> {
 }
 
 export function createHttp(apiBaseUrl: string): AxiosInstance {
-  const http = axios.create({ baseURL: apiBaseUrl, timeout: 15000 })
+  const http = axios.create({ baseURL: apiBaseUrl, timeout: 60000 })
   return http
 }
 

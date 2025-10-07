@@ -7,7 +7,6 @@ import VenueSelector from '@/components/ui/VenueSelector.vue'
 // import CategorySelector from '@/components/ui/CategorySelector.vue' // REMOVIDO
 
 import CastingBuilder from '@/components/requests/CastingBuilder.vue'
-import TurnosResumoOperacao from '@/components/ui/TurnosResumoOperacao.vue'
 import { getAdminConfig } from '@/services/settings'
 import { useAppConfig } from '@/stores/appConfig'
 
@@ -85,77 +84,15 @@ const draft = ref<NewSolicitation>(deepClone(props.modelValue))
 // Flag para suprimir emissão durante sincronizações internas
 let suppressEmit = false
 
-// Watch com immediate: false para evitar loops infinitos
-watch(() => props.modelValue, v => {
-  suppressEmit = true
-  draft.value = deepClone(v)
-  nextTick(() => { suppressEmit = false })
-}, { deep: true, immediate: false })
-
-// Emite apenas quando necessário, não em todo change
-watch(draft, v => {
-  if (suppressEmit) return
-  // Só emite se realmente mudou (evita loops)
-  const current = JSON.stringify(toRaw(v))
-  const original = JSON.stringify(props.modelValue)
-  if (current !== original) {
-    emit('update:modelValue', deepClone(v))
-  }
-}, { deep: true, immediate: false })
-
-
-
-// Watcher para recalcular turnos quando janelas mudarem (com debounce para evitar loops)
-let recalculoTimeout: NodeJS.Timeout | null = null
-watch(() => [draft.value.janelas.evento_ini, draft.value.janelas.evento_fim], () => {
-  if (recalculoTimeout) clearTimeout(recalculoTimeout)
-  recalculoTimeout = setTimeout(() => {
-    if (draft.value.datas.length > 0 && draft.value.janelas.evento_ini && draft.value.janelas.evento_fim) {
-      recalcularTurnos()
-    }
-  }, 100)
-}, { deep: true })
-
-// Computed properties reativas para os cálculos
-const totalByType = computed(() => calculateTotalByType(draft.value.turnos))
-const totalByTypeWithWeekends = computed(() => calculateTotalByTypeWithWeekends(draft.value.turnos, draft.value.datas))
-const hasExtras = computed(() => hasExtraHours(draft.value.turnos))
-
-// Wizard state
-const currentStep = ref(0)
-// Detecta plataforma para exibir label correto (Ctrl / ⌘)
-const isMac = computed(() => /mac|darwin/i.test(navigator.userAgent))
-const primaryModKey = computed(() => isMac.value ? '⌘' : 'Ctrl')
-// Mensagem de bloqueio de navegação
+// Estado do passo atual do wizard e helpers de navegação/atalhos
+const currentStep = ref<number>(0)
 const navBlockMessage = ref<string>('')
-let navBlockTimeout: any = null
-// --- Navegação por teclado (Ctrl+Seta) ---
-function isStepValid(index: number){
-  const step = wizardSteps?.value?.[index]
-  if (!step) return false
-  // Considera válido se explicitamente true ou não for false
-  return step.isValid !== false
+let navBlockTimeout: any
+const primaryModKey = /Mac|iPod|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'
+function goToStep(step: number) {
+  const s = Math.max(0, Math.floor(Number(step) || 0))
+  currentStep.value = s
 }
-
-function canGoToStep(targetIndex: number){
-  if (targetIndex < 0) return false
-  if (targetIndex > (wizardSteps.value.length - 1)) return false
-  // Para avançar exige step atual válido
-  if (targetIndex > currentStep.value) return isStepValid(currentStep.value)
-  return true
-}
-
-function goToStep(targetIndex: number){
-  if (canGoToStep(targetIndex)) {
-    currentStep.value = targetIndex
-  } else {
-    console.log('[Wizard] Avanço bloqueado: preencha os campos obrigatórios do passo atual.')
-    navBlockMessage.value = 'Complete os campos obrigatórios para avançar'
-    if (navBlockTimeout) clearTimeout(navBlockTimeout)
-    navBlockTimeout = setTimeout(() => { navBlockMessage.value = '' }, 3000)
-  }
-}
-
 function handleGlobalKeydown(e: KeyboardEvent){
   if (!(e.ctrlKey || e.metaKey)) return
   if (e.key === 'ArrowRight') {
@@ -216,6 +153,62 @@ function onUpdatePausa(val: boolean){
   try { (draft.value as any).pausa1h = !!val } catch {}
 }
 
+// Sugerir escala com base em horas por dia (preferência por 8h para janelas ~9h)
+function computeEscalaSugerida(horasDia: number): number {
+  const h = Math.max(0, Number(horasDia || 0))
+  if (h <= 0) return 8
+  if (h <= 4) return 4
+  if (h <= 6) return 6
+  if (h <= 9) return 8
+  return 12
+}
+
+function setModoAutomatico() {
+  modoEquipes.value = 'automatico'
+  const sug = computeEscalaSugerida(horasPorDia.value)
+  if (escalaHoras.value !== sug) {
+    escalaHoras.value = sug
+    try { (draft.value as any).escala_horas = sug } catch {}
+    try { if (resumoOperacao.value) (resumoOperacao.value as any).escalaHoras = sug } catch {}
+  }
+  if (!userModificouFuncoes) {
+    resetSugestoes(); lastAutoHash = buildAutoHash()
+  }
+}
+
+function setModoManual() {
+  modoEquipes.value = 'manual'
+  const sug = computeEscalaSugerida(horasPorDia.value)
+  if (escalaHoras.value !== sug) {
+    escalaHoras.value = sug
+    try { (draft.value as any).escala_horas = sug } catch {}
+    try { if (resumoOperacao.value) (resumoOperacao.value as any).escalaHoras = sug } catch {}
+  }
+}
+
+// Sincronização vinda do Step-4 (CastingBuilder) ao alterar escala em um item ou global
+function onAlterarEscala(nova: number) {
+  const h = Math.max(1, Math.round(nova || 0))
+  if (h === escalaHoras.value) return
+  escalaHoras.value = h
+  try { (draft.value as any).escala_horas = h } catch {}
+  try { if (resumoOperacao.value) (resumoOperacao.value.escalaHoras = h) } catch {}
+  // Atualiza funções planejadas que ainda não tiveram escala customizada própria (ou replica logicamente a escala base)
+  try {
+    funcoesPlanejadas.value = (funcoesPlanejadas.value || []).map(f => {
+      // Se função já tem escala específica diferente da antiga ou igual? Forçamos alinhamento somente se não houve ajuste manual identificável
+      // Heurística simples: se f.escala está ausente ou igual ao valor anterior global, substitui pelo novo
+      if (!('escala' in f) || f.escala === undefined || f.escala === null || f.escala === draft.value.escala_horas) {
+        return { ...f, escala: h }
+      }
+      return f
+    })
+  } catch {}
+  // Recalcular KPIs dependentes
+  // equipesPorDia já é computed usando escalaHoras; watchers e UI vão reagir automaticamente
+  persistWizardStateDebounced()
+}
+
 
 
 // KPIs de resumo para Step-5
@@ -223,8 +216,29 @@ const totalDiasEvento = computed(() => (budgetSummary.value?.eventDates?.length 
 // Turnos efetivos (exclui pausas e marcações que não representam trabalho real)
 const turnosEfetivos = computed(() => (draft.value.turnos || []).filter(t => !t?.isPausa && !t?.isBreak && !t?.isExtraMarker))
 const totalTurnosEvento = computed(() => turnosEfetivos.value.length)
+// Escala impacta quantidade de funções, não o número de turnos
+const horasPorDia = computed(() => Number(resumoOperacao.value?.horasPorDia || 0))
+const equipesPorDia = computed(() => {
+  const h = Math.max(0, horasPorDia.value || 0)
+  const e = Math.max(1, Math.round(escalaHoras.value || 8))
+  return h > 0 ? Math.max(1, Math.ceil(h / e)) : 1
+})
+const escalaCompat = computed(() => {
+  const h = Math.max(0, horasPorDia.value || 0)
+  const e = Math.max(1, Math.round(escalaHoras.value || 8))
+  if (h <= 0) return { ok: true, sobra: 0 }
+  const sobra = h % e
+  return { ok: sobra === 0, sobra }
+})
 const totalPeriodos = computed(() => (budgetSummary.value?.totals?.totalPeriods ?? 0))
 const modoEquipesLabel = computed(() => (modoEquipes.value === 'automatico' ? 'Automático' : 'Manual'))
+
+// Totais adicionais para cards de Resumo da Operação (Step 5)
+const totalFuncoesPlanejadas = computed(() => (funcoesPlanejadas.value || []).length)
+const totalProfissionaisResumo = computed(() => (
+  budgetSummary.value?.totals?.totalProfessionalsSmart ??
+  budgetSummary.value?.totals?.totalProfessionals ?? 0
+))
 
 
 // Estado do card do nome do evento
@@ -268,10 +282,18 @@ function criarEventoNomeCard() {
     // Emite o evento para atualizar o título
     emit('evento-nome-changed', draft.value.evento_nome)
 
-    // Foca no próximo campo (Cliente) com delay para garantir que o DOM foi atualizado
+    // Foca no próximo campo obrigatório que ainda não foi preenchido
     setTimeout(() => {
-      console.log('🎯 Tentando focar no cliente após criar card')
-      focusField('cliente')
+      // Se já existe cliente, pula para local; se já existe local, pula para datas
+      if (draft.value.cliente_nome) {
+        if (draft.value.venue?.nome) {
+          focusField('datas')
+        } else {
+          focusField('local')
+        }
+      } else {
+        focusField('cliente')
+      }
     }, 200)
   }
 }
@@ -355,6 +377,16 @@ function navigateToPreviousField(currentField: string | null) {
 function focusField(fieldName: string) {
   nextTick(() => {
     console.log(`🎯 Tentando focar no campo: ${fieldName}`)
+
+    // Pular automaticamente campos já preenchidos
+    if (fieldName === 'cliente' && draft.value.cliente_nome) {
+      // Cliente já definido: pula para local
+      return focusField('local')
+    }
+    if (fieldName === 'local' && draft.value.venue?.nome) {
+      // Local já definido: pula para datas
+      return focusField('datas')
+    }
 
     // Estratégia 1: Busca pelo data-field
     let field = document.querySelector(`[data-field="${fieldName}"]`) as HTMLElement
@@ -454,15 +486,22 @@ const jsonDebug = computed(() => {
       resumoOperacao: resumoOperacao.value,
       servicosSelecionados: servicosSelecionados.value,
       funcoesPlanejadas: funcoesPlanejadas.value,
+  funcoesPlanejadasEscalas: funcoesPlanejadas.value.map(f => ({ setor: f.setor, funcao: f.funcao, quantidade: f.quantidade, escala: f.escala || Math.max(4, Math.round(escalaHoras.value || 8)) })),
+      turnos: draft.value.turnos,
+      turnosEfetivos: turnosEfetivos.value,
       // Estado visual do Step 1 importante para recomposi e7 e3o ao voltar
       tipoEscala: tipoEscala.value,
       escalaHoras: escalaHoras.value,
       pausa1h: pausa1h.value,
+      horasPorDia: horasPorDia.value,
+      equipesPorDia: equipesPorDia.value,
+      escalaCompat: escalaCompat.value,
       draft: draft.value,
       budgetSummary: budgetSummary.value,
       // Novos campos de métricas de turnos
       total_turnos_diario: turnosEfetivos.value.length,
       total_turnos_periodo: (draft.value.datas?.length || 0) * turnosEfetivos.value.length,
+      total_funcoes_planejadas: totalFuncoes.value,
     })
   } catch {
     return { erro: 'Falha ao montar JSON de debug' }
@@ -675,7 +714,7 @@ const serviceStyleSeed = computed(() => {
 
 
 // Sugestões automáticas de funções (cartões compactos no Step 3)
-interface SugestaoFuncao { setor: string; funcao: string; quantidade: number }
+interface SugestaoFuncao { setor: string; funcao: string; quantidade: number; escala?: number }
 
 
 const sugestoesFuncoes = computed<SugestaoFuncao[]>(() => {
@@ -683,8 +722,13 @@ const sugestoesFuncoes = computed<SugestaoFuncao[]>(() => {
   const convidados = Number(draft.value.publico?.convidados_estimados || 0)
   const selecionadas = draft.value.servicos_principais || []
   const turnosCount = Math.max(1, (draft.value.turnos || []).length || 1)
+  const eqDia = Math.max(1, Number(equipesPorDia.value || 1))
 
   function add(setor: string, funcao: string, quantidade: number) {
+    const q = Math.max(0, Math.ceil((quantidade || 0) * eqDia))
+    if (q > 0) s.push({ setor, funcao, quantidade: q })
+  }
+  function addRaw(setor: string, funcao: string, quantidade: number) {
     const q = Math.max(0, Math.ceil(quantidade))
     if (q > 0) s.push({ setor, funcao, quantidade: q })
   }
@@ -705,8 +749,8 @@ const sugestoesFuncoes = computed<SugestaoFuncao[]>(() => {
     add('Estacionamento & Valet', 'Coordenador de Estacionamento', convidados > 0 ? Math.max(1, convidados / multVal('estacionamento','Coordenador de Estacionamento',300)) : 0)
   }
   if (selecionadas.includes('traducao')) {
-    add('Tradução & Interpretação', 'Intérprete', Math.max(1, turnosCount))
-    add('Tradução & Interpretação', 'Técnico de Tradução', turnosCount > 1 ? 1 : 0)
+    addRaw('Tradução & Interpretação', 'Intérprete', Math.max(1, eqDia))
+    addRaw('Tradução & Interpretação', 'Técnico de Tradução', eqDia > 1 ? 1 : 0)
   }
   if (selecionadas.includes('seguranca')) {
     add('Segurança & Saúde', 'Segurança', convidados / multVal('seguranca','Segurança',150))
@@ -747,6 +791,8 @@ function buildAutoHash(): string {
     servicos: [...(draft.value.servicos_principais || [])].sort(),
     turnos: (draft.value.turnos || []).length,
     modo: modoEquipes.value,
+    escala: Math.round(escalaHoras.value || 8),
+    horasDia: Math.round((horasPorDia.value || 0) * 100) / 100,
   }
   try { return btoa(unescape(encodeURIComponent(JSON.stringify(base)))) } catch { return JSON.stringify(base) }
 }
@@ -754,6 +800,9 @@ const showAddFunc = ref(false)
 const addFilterId = ref<string>('all')
 const addSearch = ref<string>('')
 const showFilterMenu = ref(false)
+// Popovers de escala
+const escalaMenuOpen = ref(false)
+const openEscalaIdx = ref<number|null>(null)
 
 
 
@@ -816,7 +865,13 @@ onMounted(() => {
           resumoOperacao.value = parsed.resumoOperacao
         }
         if (Array.isArray(parsed.funcoesPlanejadas)) {
-          funcoesPlanejadas.value = parsed.funcoesPlanejadas
+          const def = Math.max(4, Math.round(escalaHoras.value || 8))
+          funcoesPlanejadas.value = parsed.funcoesPlanejadas.map((x: any) => ({
+            setor: x.setor,
+            funcao: x.funcao,
+            quantidade: Number(x.quantidade || 0),
+            escala: Number(x.escala || def)
+          }))
         }
         if (typeof parsed.eventoNome === 'string' && parsed.eventoNome.trim()) {
           draft.value.evento_nome = parsed.eventoNome
@@ -916,7 +971,7 @@ function addFuncFromCatalog(setor: string, funcao: string) {
   if (idx >= 0) {
     funcoesPlanejadas.value[idx].quantidade = (funcoesPlanejadas.value[idx].quantidade || 0) + 1
   } else {
-    funcoesPlanejadas.value.push({ setor, funcao, quantidade: 1 })
+    funcoesPlanejadas.value.push({ setor, funcao, quantidade: 1, escala: Math.max(4, Math.round(escalaHoras.value || 8)) })
   }
   userModificouFuncoes = true
 }
@@ -927,7 +982,7 @@ function toggleFuncFromCatalog(setor: string, funcao: string) {
     // Remover função inteira
     funcoesPlanejadas.value.splice(idx, 1)
   } else {
-    funcoesPlanejadas.value.push({ setor, funcao, quantidade: 1 })
+    funcoesPlanejadas.value.push({ setor, funcao, quantidade: 1, escala: Math.max(4, Math.round(escalaHoras.value || 8)) })
   }
   userModificouFuncoes = true
 }
@@ -936,7 +991,8 @@ function toggleFuncFromCatalog(setor: string, funcao: string) {
 const totalFuncoes = computed(() => funcoesPlanejadas.value.reduce((acc, f) => acc + (f.quantidade || 0), 0))
 
 function resetSugestoes() {
-  funcoesPlanejadas.value = sugestoesFuncoes.value.map(x => ({ ...x }))
+  const defaultEscala = Math.max(4, Math.round(computeEscalaSugerida(horasPorDia.value) || escalaHoras.value || 8))
+  funcoesPlanejadas.value = sugestoesFuncoes.value.map(x => ({ ...x, escala: defaultEscala }))
   userModificouFuncoes = false
 }
 
@@ -950,6 +1006,15 @@ watch(modoEquipes, v => {
   }
 })
 
+// Regenerar sugestões quando a escala mudar, somente no modo automático e se o usuário não alterou manualmente
+watch(escalaHoras, () => {
+  if (modoEquipes.value !== 'automatico') return
+  if (!userModificouFuncoes) {
+    resetSugestoes()
+    lastAutoHash = buildAutoHash()
+  }
+})
+
 // Ao entrar no Step 3 (services), garantir preenchimento ou limpeza conforme o modo
 watch(currentStep, () => {
   const stepObj = wizardSteps.value[currentStep.value]
@@ -959,6 +1024,13 @@ watch(currentStep, () => {
     nextTick(() => { try { convidadosInputRef.value?.focus() } catch {} })
   }
   if (stepObj.id === 'services') {
+    // Ajusta escala sugerida ao entrar no Step 3
+    const sug = computeEscalaSugerida(horasPorDia.value)
+    if (escalaHoras.value !== sug) {
+      escalaHoras.value = sug
+      try { (draft.value as any).escala_horas = sug } catch {}
+      try { if (resumoOperacao.value) (resumoOperacao.value as any).escalaHoras = sug } catch {}
+    }
     if (modoEquipes.value === 'automatico') {
       const newHash = buildAutoHash()
       const baseMudou = lastAutoHash && lastAutoHash !== newHash
@@ -997,6 +1069,21 @@ function incFuncao(i: number) { funcoesPlanejadas.value[i].quantidade++; userMod
 function decFuncao(i: number) { funcoesPlanejadas.value[i].quantidade = Math.max(0, (funcoesPlanejadas.value[i].quantidade || 0) - 1); userModificouFuncoes = true }
 function removeFuncao(i: number) { funcoesPlanejadas.value.splice(i, 1); userModificouFuncoes = true }
 function clearFuncoes() { funcoesPlanejadas.value = []; userModificouFuncoes = true }
+
+function setEscalaFuncao(i: number, horas: number) {
+  const h = Math.max(4, Math.round(horas || 8))
+  const item = funcoesPlanejadas.value[i]
+  const horasDia = Math.max(0, Number((resumoOperacao.value?.horasPorDia as any) || 0))
+  const escalaAntiga = Math.max(4, Math.round((item.escala || escalaHoras.value || 8)))
+  const eqOld = horasDia > 0 ? Math.max(1, Math.ceil(horasDia / escalaAntiga)) : 1
+  const eqNew = horasDia > 0 ? Math.max(1, Math.ceil(horasDia / h)) : 1
+  const atual = Math.max(0, Number(item.quantidade || 0))
+  const base = Math.max(1, Math.round(atual / Math.max(1, eqOld)))
+  item.escala = h
+  item.quantidade = Math.max(0, Math.ceil(base * eqNew))
+  funcoesPlanejadas.value.splice(i, 1, { ...item })
+  userModificouFuncoes = true
+}
 
 
 function onWizardComplete() {
@@ -1386,11 +1473,7 @@ function onToggleEstrategia() {
   nextTick(() => { suppressEmit = false })
 }
 // Altera escala a partir do DateRangePicker/TurnosDetectados e recalcula
-function onAlterarEscala(horas: number){
-  escalaHoras.value = Math.max(4, horas)
-  try { (draft.value as any).escala_horas = escalaHoras.value } catch {}
-  recalcularTurnos()
-}
+// (Função onAlterarEscala consolidada definida anteriormente)
 
 </script>
 
@@ -1844,13 +1927,13 @@ function onAlterarEscala(horas: number){
 
         <!-- Setores & Funções (modo de configuração) -->
         <div class="card p-4 bg-gradient-to-r from-white-50 to-indigo-50 border-gray-200">
-          <h3 class="text-lg font-semibold text-gray-900 mb-3">Setores & Funções</h3>
+          <h3 class="text-lg font-semibold text-gray-900 mb-3">Robô de Seleção</h3>
           <p class="text-sm text-blue-700 mb-4">Escolha como configurar as equipes de mão de obra para seu evento:</p>
 
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <!-- Modo Automático -->
             <div
-              @click="modoEquipes = 'automatico'"
+              @click="setModoAutomatico()"
               :class="[
                 'bg-white p-3 rounded-lg border-2 cursor-pointer transition-colors',
                 modoEquipes === 'automatico' ? 'border-green-400 bg-green-50' : 'border-green-200 hover:border-green-300'
@@ -1872,7 +1955,7 @@ function onAlterarEscala(horas: number){
 
             <!-- Modo Manual -->
             <div
-              @click="modoEquipes = 'manual'"
+              @click="setModoManual()"
               :class="[
                 'bg-white p-3 rounded-lg border-2 cursor-pointer transition-colors',
                 modoEquipes === 'manual' ? 'border-blue-400 bg-blue-50' : 'border-blue-200 hover:border-blue-300'
@@ -1892,7 +1975,12 @@ function onAlterarEscala(horas: number){
               </div> -->
         </div>
         </div>
+
+     
+
         </div>
+           <!-- Escala (impacta diretamente as funções) → card separado abaixo de Setores & Funções -->
+        
         </div>
         <div>
 
@@ -1914,6 +2002,8 @@ function onAlterarEscala(horas: number){
               </button>
             </div>
           </div>
+
+          
 
 
           <div v-if="funcoesPlanejadas.length > 0" class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1943,9 +2033,31 @@ function onAlterarEscala(horas: number){
                   <div class="min-w-0">
                     <div class="text-sm font-semibold text-gray-900">{{ s.funcao }}</div>
                     <div class="text-xs text-gray-500">{{ s.setor }}</div>
+                    <div class="mt-1 relative inline-block bg-blue-50">
+                      <button type="button"
+                        class="px-2 py-1 rounded text-xs font-medium flex items-center gap-1 text-blue-700 hover:bg-gray-100"
+                        @click="openEscalaIdx = openEscalaIdx === i ? null : i">
+                        <span>Escala de: {{ s.escala || escalaHoras }}h</span>
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                      </button>
+                      <div v-if="openEscalaIdx === i" class=" absolute left-0 mt-1 w-[130px] bg-white border border-gray-200 rounded-md shadow-lg z-50">
+                        <button type="button" class="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50"
+                          :class="(s.escala || escalaHoras) === 4 ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'"
+                          @click="setEscalaFuncao(i, 4); openEscalaIdx = null">Escala de 4 horas</button>
+                        <button type="button" class="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50"
+                          :class="(s.escala || escalaHoras) === 6 ? 'text-blue-700 font-medium' : 'text-gray-700'"
+                          @click="setEscalaFuncao(i, 6); openEscalaIdx = null">Escala de 6 horas</button>
+                        <button type="button" class="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50"
+                          :class="(s.escala || escalaHoras) === 8 ? 'text-blue-700 font-medium' : 'text-gray-700'"
+                          @click="setEscalaFuncao(i, 8); openEscalaIdx = null">Escala de 8 horas</button>
+                        <button type="button" class="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50"
+                          :class="(s.escala || escalaHoras) === 12 ? 'text-blue-700 font-medium' : 'text-gray-700'"
+                          @click="setEscalaFuncao(i, 12); openEscalaIdx = null">Escala de 12 horas</button>
+                      </div>
+                    </div>
                   </div>
                 </div>
-                <div class="flex items-center gap-2 flex-shrink-0">
+    <div class="flex items-center gap-3 flex-shrink-0">
                   <button type="button" class="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-100" title="Diminuir" tabindex="-1" @click="decFuncao(i)" aria-label="Diminuir quantidade">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14"></path>
@@ -2016,9 +2128,31 @@ function onAlterarEscala(horas: number){
                   <div class="min-w-0">
                     <div class="text-sm font-semibold text-gray-900">{{ s.funcao }}</div>
                     <div class="text-xs text-gray-500">{{ s.setor }}</div>
+                    <div class="mt-1 relative inline-block">
+                      <button type="button"
+                        class=" px-2 py-1 rounded text-xs font-medium flex items-center gap-1 text-blue-700 hover:bg-gray-100"
+                        @click="openEscalaIdx = openEscalaIdx === i ? null : i">
+                        <span>{{ s.escala || escalaHoras }}h</span>
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                      </button>
+                      <div v-if="openEscalaIdx === i" class="absolute left-0 mt-1 w-28 bg-white border border-gray-200 rounded-md shadow-lg z-50">
+                        <button type="button" class="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50"
+                          :class="(s.escala || escalaHoras) === 4 ? 'text-blue-700 font-medium' : 'text-gray-700'"
+                          @click="setEscalaFuncao(i, 4); openEscalaIdx = null">4 horas</button>
+                        <button type="button" class="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50"
+                          :class="(s.escala || escalaHoras) === 6 ? 'text-blue-700 font-medium' : 'text-gray-700'"
+                          @click="setEscalaFuncao(i, 6); openEscalaIdx = null">6 horas</button>
+                        <button type="button" class="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50"
+                          :class="(s.escala || escalaHoras) === 8 ? 'text-blue-700 font-medium' : 'text-gray-700'"
+                          @click="setEscalaFuncao(i, 8); openEscalaIdx = null">8 horas</button>
+                        <button type="button" class="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50"
+                          :class="(s.escala || escalaHoras) === 12 ? 'text-blue-700 font-medium' : 'text-gray-700'"
+                          @click="setEscalaFuncao(i, 12); openEscalaIdx = null">12 horas</button>
+                      </div>
+                    </div>
                   </div>
                 </div>
-                <div class="flex items-center gap-2 flex-shrink-0">
+    <div class="flex items-center gap-3 flex-shrink-0">
                   <button type="button" class="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-100" title="Diminuir" tabindex="-1" @click="decFuncao(i)" aria-label="Diminuir quantidade">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14"></path>
@@ -2376,17 +2510,7 @@ function onAlterarEscala(horas: number){
 
       <!-- Step 4: Team & Budget -->
       <div v-if="step.id === 'team'" class="space-y-6">
-        <div class="p-6 space-y-6">
-          <TurnosResumoOperacao
-            v-if="resumoOperacao"
-            :resumo="resumoOperacao"
-            :datas="draft.datas"
-            :total-by-type="{ horasTrabalho: resumoOperacao.horasPorDia, noturnas: resumoOperacao.horasNoturnasPorDia, temPausa: resumoOperacao.temPausa1h }"
-            :horas-por-turno-diario="{ manha:0, tarde:0, noite:0, madrugada:0 }"
-            :daily-extra-minutes="0"
-            :total-turnos-periodo="(draft.datas?.length || 0) * (resumoOperacao?.quantidadeTurnos || 0)"
-          />
-
+        <div>
           <CastingBuilder
             ref="castingRef"
             :initial-guests="draft.publico.convidados_estimados || 0"
@@ -2409,6 +2533,7 @@ function onAlterarEscala(horas: number){
             :local-nome="draft.venue?.nome"
             :tipo-escala="tipoEscala"
             :modo-equipes="modoEquipes"
+            @alterar-escala="onAlterarEscala"
           />
         </div>
 
@@ -2420,108 +2545,129 @@ function onAlterarEscala(horas: number){
       <div v-if="step.id === 'final'" class="space-y-6">
         <!-- Event Summary -->
 
-        <!-- Resumo Geral (visual) -->
-        <div class="card p-6 space-y-4">
-          <div class="flex items-center justify-between">
-            <h3 class="text-lg font-semibold text-gray-900">Resumo Geral</h3>
-            <div class="text-xs text-slate-500" v-if="budgetSummary">Atualizado</div>
+        <!-- Resumo da Operação em Cards -->
+        <div class="space-y-6">
+          <!-- Linha 1: Identidade do Evento -->
+          <div class="grid gap-4 md:grid-cols-4 lg:grid-cols-6">
+            <div class="p-4 rounded-xl border bg-white/70 col-span-2">
+              <div class="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Nome do Evento</div>
+              <div class="font-semibold text-slate-900 truncate" :title="draft.evento_nome">{{ draft.evento_nome || '—' }}</div>
+            </div>
+            <div class="p-4 rounded-xl border bg-white/70 col-span-2">
+              <div class="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Cliente</div>
+              <div class="font-semibold text-slate-900 truncate" :title="draft.cliente_nome">{{ draft.cliente_nome || '—' }}</div>
+            </div>
+            <div class="p-4 rounded-xl border bg-white/70 col-span-2">
+              <div class="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Local</div>
+              <div class="font-semibold text-slate-900 truncate" :title="draft.venue?.nome">{{ draft.venue?.nome || '—' }}</div>
+            </div>
           </div>
 
-          <!-- Indicadores principais -->
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div class="rounded-lg border p-3 bg-white/70">
-              <div class="text-[11px] text-slate-600">Subtotal</div>
-              <div class="text-base font-bold">{{ money(budgetSummary?.totals?.subtotal || 0) }}</div>
+          <!-- Linha 2: Estrutura Temporal -->
+          <div class="grid gap-4 md:grid-cols-4 lg:grid-cols-6">
+            <div class="p-4 rounded-xl border bg-white/70">
+              <div class="text-[11px] text-slate-500">Dias de Evento</div>
+              <div class="text-lg font-bold">{{ draft.datas.length || 0 }}</div>
             </div>
-            <div class="rounded-lg border p-3 bg-white/70">
-              <div class="text-[11px] text-slate-600">Taxa de Serviço ({{ budgetSummary?.feePct || 0 }}%)</div>
-              <div class="text-base font-bold">{{ money(budgetSummary?.totals?.serviceFee || 0) }}</div>
+            <div class="p-4 rounded-xl border bg-white/70">
+              <div class="text-[11px] text-slate-500">Turnos/Dia</div>
+              <div class="text-lg font-bold">{{ turnosEfetivos.length || 0 }}</div>
             </div>
-            <div class="rounded-lg border p-3 bg-white/70">
-              <div class="text-[11px] text-slate-600">Custos Fixos</div>
-              <div class="text-base font-bold">{{ money(budgetSummary?.fixed || 0) }}</div>
+            <div class="p-4 rounded-xl border bg-white/70">
+              <div class="text-[11px] text-slate-500">Períodos</div>
+              <div class="text-lg font-bold">{{ budgetSummary?.totals?.totalPeriods || totalPeriodos }}</div>
             </div>
-            <div class="rounded-lg border p-3 bg-emerald-50 border-emerald-200">
+            <div class="p-4 rounded-xl border bg-white/70">
+              <div class="text-[11px] text-slate-500">Horas/Dia</div>
+              <div class="text-lg font-bold">{{ resumoOperacao?.horasPorDia || 0 }}h</div>
+            </div>
+            <div class="p-4 rounded-xl border bg-white/70">
+              <div class="text-[11px] text-slate-500">Escala</div>
+              <div class="text-lg font-bold">{{ escalaHoras }}h</div>
+            </div>
+            <div class="p-4 rounded-xl border bg-white/70" :class="resumoOperacao?.temPausa1h ? 'border-amber-300 bg-amber-50/60' : (resumoOperacao?.temHoraExtra ? 'border-fuchsia-300 bg-fuchsia-50/60' : '')">
+              <div class="text-[11px] text-slate-500">Pausa / Extra</div>
+              <div class="text-sm font-semibold">
+                <span v-if="resumoOperacao?.temPausa1h">Pausa 1h</span>
+                <span v-else-if="resumoOperacao?.temHoraExtra">Hora extra</span>
+                <span v-else class="text-slate-400">—</span>
+              </div>
+            </div>
+          </div>
+
+            <!-- Linha 3: Serviços & Segmento -->
+          <div class="grid gap-4 md:grid-cols-4 lg:grid-cols-6">
+            <div class="p-4 rounded-xl border bg-white/70">
+              <div class="text-[11px] text-slate-500">Segmento</div>
+              <div class="text-sm font-semibold truncate" :title="segmentosEvento.find(s => s.id === draft.segmento)?.nome || draft.segmento">{{ segmentosEvento.find(s => s.id === draft.segmento)?.nome || draft.segmento || '—' }}</div>
+            </div>
+            <div class="p-4 rounded-xl border bg-white/70 col-span-2">
+              <div class="text-[11px] text-slate-500 mb-1">Serviços Selecionados</div>
+              <div class="flex flex-wrap gap-1">
+                <span v-for="s in (draft.servicos_principais || [])" :key="s" class="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-800 border border-indigo-200 text-[11px]">{{ s }}</span>
+                <span v-if="!(draft.servicos_principais || []).length" class="text-[11px] text-slate-400">Nenhum</span>
+              </div>
+            </div>
+            <div class="p-4 rounded-xl border bg-white/70">
+              <div class="text-[11px] text-slate-500">Convidados</div>
+              <div class="text-lg font-bold">{{ draft.publico?.convidados_estimados || 0 }}</div>
+            </div>
+            <div class="p-4 rounded-xl border bg-white/70">
+              <div class="text-[11px] text-slate-500">Modo Seleção</div>
+              <div class="text-sm font-semibold">{{ modoEquipesLabel }}</div>
+            </div>
+            <div class="p-4 rounded-xl border bg-white/70">
+              <div class="text-[11px] text-slate-500">Funções Planejadas</div>
+              <div class="text-lg font-bold">{{ totalFuncoesPlanejadas }}</div>
+            </div>
+          </div>
+
+          <!-- Linha 4: Equipes & Valores -->
+          <div class="grid gap-4 md:grid-cols-4 lg:grid-cols-6">
+            <div class="p-4 rounded-xl border bg-white/70">
+              <div class="text-[11px] text-slate-500">Profissionais</div>
+              <div class="text-lg font-bold">{{ totalProfissionaisResumo }}</div>
+            </div>
+            <div class="p-4 rounded-xl border bg-white/70">
+              <div class="text-[11px] text-slate-500">Funções no Carrinho</div>
+              <div class="text-lg font-bold">{{ budgetSummary?.totals?.uniqueRoles || 0 }}</div>
+            </div>
+            <div class="p-4 rounded-xl border bg-white/70">
+              <div class="text-[11px] text-slate-500">Subtotal</div>
+              <div class="text-sm font-semibold">{{ money(budgetSummary?.totals?.subtotal || 0) }}</div>
+            </div>
+            <div class="p-4 rounded-xl border bg-white/70">
+              <div class="text-[11px] text-slate-500">Taxa Serviço</div>
+              <div class="text-sm font-semibold">{{ money(budgetSummary?.totals?.serviceFee || 0) }}</div>
+            </div>
+            <div class="p-4 rounded-xl border bg-white/70">
+              <div class="text-[11px] text-slate-500">Custos Fixos</div>
+              <div class="text-sm font-semibold">{{ money(budgetSummary?.fixed || 0) }}</div>
+            </div>
+            <div class="p-4 rounded-xl border bg-emerald-50 border-emerald-300">
               <div class="text-[11px] text-emerald-700">Total</div>
               <div class="text-base font-bold text-emerald-900">{{ money(budgetSummary?.totals?.total || 0) }}</div>
             </div>
           </div>
 
-          <!-- Etapas: Infos, Datas/Turnos, Serviços, Público -->
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div class="space-y-3">
-              <div class="rounded-lg border p-3">
-                <div class="text-[11px] text-slate-600 mb-1">Info Básica</div>
-                <div class="text-sm">
-                  <div><span class="text-slate-500">Evento:</span> <strong>{{ draft.evento_nome || '—' }}</strong></div>
-                  <div><span class="text-slate-500">Cliente:</span> <strong>{{ draft.cliente_nome || '—' }}</strong></div>
-                  <div><span class="text-slate-500">Local:</span> <strong>{{ draft.venue?.nome || '—' }}</strong></div>
-                  <div><span class="text-slate-500">Segmento:</span> <strong>{{ segmentosEvento.find(s => s.id === draft.segmento)?.nome || draft.segmento || '—' }}</strong></div>
-                  <div><span class="text-slate-500">Convidados:</span> <strong>{{ draft.publico?.convidados_estimados || 0 }}</strong></div>
-                </div>
-              </div>
-
-              <div class="rounded-lg border p-3">
-                <div class="text-[11px] text-slate-600 mb-1">Datas & Turnos</div>
-                <div class="flex flex-wrap gap-2 text-xs">
-                  <span v-for="d in (budgetSummary?.eventDates || draft.datas || [])" :key="d" class="px-2 py-1 rounded-full bg-slate-100 border">{{ d }}</span>
-                </div>
-                <div class="mt-2 text-xs text-slate-600">
-                  Horas por Dia: <strong>{{ (resumoOperacao?.horasPorDia || 0) }}</strong>h
-                  <span v-if="resumoOperacao?.temHoraExtra" class="ml-2 px-2 py-0.5 rounded-full bg-fuchsia-100 text-fuchsia-800">Hora extra</span>
-                  <span v-if="resumoOperacao?.temPausa1h" class="ml-2 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Pausa 1h</span>
-                  <div class="mt-1">
-                    Total de Horas no Período: <strong>{{ (resumoOperacao?.horasTotalPeriodo || 0) }}</strong>h
-                    <span class="text-slate-400">( {{ draft.datas?.length || 0 }} dia(s) )</span>
-                  </div>
-                </div>
-              </div>
-
-              <div class="rounded-lg border p-3">
-                <div class="text-[11px] text-slate-600 mb-1">Serviços Selecionados</div>
-                <div class="flex flex-wrap gap-2 text-xs">
-                  <span v-for="s in (draft.servicos_principais || [])" :key="s" class="px-2 py-1 rounded-full bg-indigo-50 text-indigo-800 border border-indigo-200">{{ s }}</span>
-                  <span v-if="!(draft.servicos_principais || []).length" class="text-slate-500">Nenhum serviço selecionado</span>
-                </div>
-              </div>
+          <!-- Linha 5: Lista de Equipes detalhada (mantida) -->
+          <div class="rounded-xl border p-4 bg-white/70">
+            <div class="flex items-center justify-between mb-3">
+              <h4 class="text-sm font-semibold text-slate-800">Equipes Selecionadas</h4>
+              <div class="text-[11px] text-slate-500" v-if="budgetSummary">{{ (budgetSummary?.cart || []).length }} função(ões)</div>
             </div>
-
-            <!-- Equipes & Totais -->
-            <div class="space-y-3">
-              <div class="rounded-lg border p-3">
-                <div class="text-[11px] text-slate-600 mb-2">Totais de Equipes</div>
-                <div class="grid grid-cols-3 gap-2 text-xs">
-                  <div class="bg-white rounded border p-2">
-                    <div class="text-[10px] text-slate-500">Profissionais</div>
-                    <div class="font-semibold">{{ budgetSummary?.totals?.totalProfessionals || 0 }}</div>
-                  </div>
-                  <div class="bg-white rounded border p-2">
-                    <div class="text-[10px] text-slate-500">Períodos</div>
-                    <div class="font-semibold">{{ budgetSummary?.totals?.totalPeriods || 0 }}</div>
-                  </div>
-                  <div class="bg-white rounded border p-2">
-                    <div class="text-[10px] text-slate-500">Funções</div>
-                    <div class="font-semibold">{{ budgetSummary?.totals?.uniqueRoles || 0 }}</div>
-                  </div>
+            <div v-if="!(budgetSummary?.cart || []).length" class="text-xs text-slate-500">Nenhuma função adicionada</div>
+            <div v-else class="space-y-2">
+              <div v-for="line in (budgetSummary?.cart || [])" :key="line.key" class="border rounded p-2 bg-white">
+                <div class="flex items-center justify-between">
+                  <div class="text-sm font-medium truncate">{{ line.key }} <span class="text-slate-400">• {{ line.sector }}</span></div>
+                  <div class="text-sm font-semibold">{{ itemQtyFromSummary(line) }} prof • {{ money(itemSubtotalFromSummary(line)) }}</div>
                 </div>
-              </div>
-
-              <div class="rounded-lg border p-3">
-                <div class="text-[11px] text-slate-600 mb-2">Equipes Selecionadas</div>
-                <div v-if="!(budgetSummary?.cart || []).length" class="text-xs text-slate-500">Nenhuma função adicionada</div>
-                <div v-else class="space-y-2">
-                  <div v-for="line in (budgetSummary?.cart || [])" :key="line.key" class="border rounded p-2">
-                    <div class="flex items-center justify-between">
-                      <div class="text-sm font-medium truncate">{{ line.key }} <span class="text-slate-400">• {{ line.sector }}</span></div>
-                      <div class="text-sm font-semibold">{{ itemQtyFromSummary(line) }} prof • {{ money(itemSubtotalFromSummary(line)) }}</div>
-                    </div>
-                    <div class="mt-1 flex flex-wrap gap-1 text-[11px]">
-                      <span v-for="a in (line.assignments || [])" :key="a.date+'|'+a.period" class="px-2 py-0.5 rounded border"
-                        :class="a.isExtra ? 'bg-fuchsia-50 border-fuchsia-200 text-fuchsia-800' : 'bg-slate-50 border-slate-200 text-slate-700'">
-                        {{ a.date }} • {{ a.isExtra ? 'extra' : a.period }} • {{ a.qty }}x {{ money(a.price) }}
-                      </span>
-                    </div>
-                  </div>
+                <div class="mt-1 flex flex-wrap gap-1 text-[11px]">
+                  <span v-for="a in (line.assignments || [])" :key="a.date+'|'+a.period" class="px-2 py-0.5 rounded border"
+                    :class="a.isExtra ? 'bg-fuchsia-50 border-fuchsia-200 text-fuchsia-800' : 'bg-slate-50 border-slate-200 text-slate-700'">
+                    {{ a.date }} • {{ a.isExtra ? 'extra' : a.period }} • {{ a.qty }}x {{ money(a.price) }}
+                  </span>
                 </div>
               </div>
             </div>

@@ -34,8 +34,9 @@ const searchQuery = ref('')
 const isOpen = ref(false)
 const isLoading = ref(false)
 const venues = ref<Venue[]>([])
-const selectedVenue = ref<Venue | null>(props.modelValue)
+const selectedVenue = ref<Venue | null>(props.modelValue ?? null)
 const highlightedIndex = ref(-1)
+const touched = ref(false)
 
 // Carrega locais do cliente da API
 async function loadClientVenues(clientId: string) {
@@ -89,7 +90,7 @@ const displayValue = computed(() => {
 })
 
 watch(() => props.modelValue, (newValue) => {
-  selectedVenue.value = newValue
+  selectedVenue.value = newValue ?? null
   if (newValue) {
     searchQuery.value = newValue.nome
   }
@@ -187,6 +188,7 @@ async function handleFocus() {
 }
 
 function handleBlur() {
+  touched.value = true
   // Delay to allow click on dropdown items
   setTimeout(() => {
     isOpen.value = false
@@ -220,7 +222,7 @@ onMounted(() => {
         :required="required"
         class="input pr-10"
         :class="{
-          'input-error': required && !selectedVenue,
+          'input-error': required && touched && !selectedVenue,
           'cursor-not-allowed': disabled
         }"
         autocomplete="off"

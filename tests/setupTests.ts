@@ -112,6 +112,8 @@ vi.mock('@/services/dashboard', () => ({
 config.global.stubs = {
   ...(config.global.stubs || {}),
   apexchart: { template: '<div class="apexchart-stub" />' },
+  // Stub global para o componente Icon usado em diversos lugares (ex.: DateRangePicker)
+  Icon: { template: '<i class="icon-stub"><slot /></i>' },
 }
 
 // Mock de matchMedia (usado por libs UI às vezes)

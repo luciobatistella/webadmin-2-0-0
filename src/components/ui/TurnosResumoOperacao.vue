@@ -23,7 +23,7 @@
       <div class="text-xs text-blue-600 uppercase font-medium mb-2">OPERAÇÃO DIÁRIA</div>
       <div class="flex items-center gap-2 mb-1">
         <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 whitespace-nowrap">
-          ⏱️ {{ totalByType.horasTrabalho }}h trabalhadas por dia
+          ⏱️ {{ totalByType.horasTrabalho }}h trabalhadas
         </span>
       </div>
       <div class="flex items-center gap-2 mb-2">
@@ -36,7 +36,7 @@
           <span v-if="resumo.tiposTurno.manha>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 whitespace-nowrap">🌅 Manhã: {{ humanDuration(horasPorTurnoDiario.manha) }}</span>
           <span v-if="resumo.tiposTurno.tarde>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 whitespace-nowrap">☀️ Tarde: {{ humanDuration(horasPorTurnoDiario.tarde) }}</span>
           <span v-if="resumo.tiposTurno.noite>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 whitespace-nowrap">🌙 Noite: {{ humanDuration(horasPorTurnoDiario.noite) }}</span>
-          <span v-if="resumo.tiposTurno.madrugada>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 whitespace-nowrap">🌃 Madrugada: {{ humanDuration(horasPorTurnoDiario.madrugada) }}</span>
+          <span v-if="resumo.tiposTurno.madrugada>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 whitespace-nowrap">Madrugada: {{ humanDuration(horasPorTurnoDiario.madrugada) }}</span>
           <span v-if="dailyExtraMinutes > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-50 text-orange-700 border border-orange-200 whitespace-nowrap">⚡ Hora extra: {{ humanDuration(dailyExtraMinutes) }}</span>
         </div>
         <span v-if="totalByType.noturnas > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">{{ totalByType.noturnas }}h noturnas</span>

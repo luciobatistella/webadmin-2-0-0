@@ -18,6 +18,8 @@ const routes: RouteRecordRaw[] = [
       { path: '/requests', name: 'requests', component: () => import('../views/RequestsView.vue'), meta: { title: 'Solicitações' } },
       { path: '/settings', name: 'settings', component: () => import('../views/SettingsView.vue'), meta: { title: 'Configurações' } },
       { path: '/cooperados', name: 'cooperados', component: () => import('../views/CooperadosView.vue'), meta: { title: 'Cooperados', keepAlive: true } },
+  { path: '/cooperados/:id', name: 'cooperado-detail', component: () => import('../components/cooperados/CooperadoDetailPage.vue'), meta: { title: 'Detalhe do Cooperado' } },
+  { path: '/cooperados/new', name: 'cooperado-new', component: () => import('../components/cooperados/CooperadoDetailPage.vue'), meta: { title: 'Novo Cooperado' } },
       { path: '/billing', name: 'billing', component: () => import('../views/BillingView.vue'), meta: { title: 'Faturamento', keepAlive: true } },
       { path: '/solicitacoes', name: 'solicitacoes', component: () => import('../views/EventView.vue'), meta: { title: 'Solicitações', keepAlive: true } },
       { path: '/solicitacoes/new', name: 'request-new', component: () => import('../components/requests/SolicitationCreatePage.vue'), meta: { title: 'Nova Solicitação' } },
@@ -32,6 +34,24 @@ const router = createRouter({
 })
 
 router.beforeEach((to) => authGuard(to) as RouteLocationRaw | void)
+
+// Limpa rascunhos de "Nova Solicitação" ao acessar diretamente a rota
+router.beforeEach((to) => {
+  if (to.name === 'request-new') {
+    try {
+      const prefixes = ['solicitacoes:new:', 'evsp:last']
+      const ls = (typeof localStorage !== 'undefined') ? localStorage : null
+      if (ls) {
+        for (let i = ls.length - 1; i >= 0; i--) {
+          const key = ls.key(i)
+          if (key && prefixes.some(p => key.startsWith(p))) {
+            ls.removeItem(key)
+          }
+        }
+      }
+    } catch {}
+  }
+})
 
 export default router
 

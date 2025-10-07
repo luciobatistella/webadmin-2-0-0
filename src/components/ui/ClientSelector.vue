@@ -31,8 +31,9 @@ const searchQuery = ref('')
 const isOpen = ref(false)
 const isLoading = ref(false)
 const clients = ref<Client[]>([])
-const selectedClient = ref<Client | null>(props.modelValue)
+const selectedClient = ref<Client | null>(props.modelValue ?? null)
 const highlightedIndex = ref(-1)
+const touched = ref(false)
 
 // Carrega clientes da API
 async function loadClients() {
@@ -76,7 +77,7 @@ const displayValue = computed(() => {
 })
 
 watch(() => props.modelValue, (newValue) => {
-  selectedClient.value = newValue
+  selectedClient.value = newValue ?? null
   if (newValue) {
     searchQuery.value = newValue.nome
   }
@@ -157,6 +158,7 @@ async function handleFocus() {
 }
 
 function handleBlur() {
+  touched.value = true
   // Delay to allow click on dropdown items
   setTimeout(() => {
     isOpen.value = false
@@ -193,7 +195,7 @@ onMounted(async () => {
         :required="required"
         class="input pr-10"
         :class="{
-          'input-error': required && !selectedClient,
+          'input-error': required && touched && !selectedClient,
           'cursor-not-allowed': disabled
         }"
         autocomplete="off"

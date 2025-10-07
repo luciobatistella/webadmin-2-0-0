@@ -14,7 +14,7 @@ function getToken(): string | null {
 }
 
 export function createApi(baseURL: string): AxiosInstance {
-  const api = axios.create({ baseURL, timeout: 20000 })
+  const api = axios.create({ baseURL, timeout: 60000 })
 
   api.interceptors.request.use(cfg => {
     const token = getToken()
@@ -29,6 +29,15 @@ export function createApi(baseURL: string): AxiosInstance {
   api.interceptors.response.use(
     res => res,
     err => {
+      // Log amigável para timeouts e erros comuns
+      try {
+        const cfg = (err as AxiosError)?.config as AxiosRequestConfig | undefined
+        const url = cfg?.baseURL ? `${cfg.baseURL}${cfg.url || ''}` : (cfg?.url || '')
+        const code = (err as AxiosError)?.code || ''
+        if (code === 'ECONNABORTED') {
+          console.warn('[api][timeout]', { url, timeout: (cfg as any)?.timeout })
+        }
+      } catch {}
       const status = (err as AxiosError)?.response?.status
       if (status === 401) {
         localStorage.removeItem('authResult')
