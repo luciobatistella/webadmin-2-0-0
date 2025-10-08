@@ -7,16 +7,14 @@
     <div class="min-w-0 ml-60">
       <main class="p-4 container mx-auto max-w-[1400px] pb-20">
         <RouterView v-slot="{ Component, route }">
-          <template v-if="route?.meta?.keepAlive">
-            <KeepAlive>
-              <component :is="Component" :key="route.name" />
-            </KeepAlive>
-          </template>
-          <template v-else>
-            <Transition name="route-fade" mode="out-in">
-              <component :is="Component" :key="route.fullPath" />
-            </Transition>
-          </template>
+          <!-- Mantém o wrapper KeepAlive sempre montado para preservar o cache das rotas marcadas -->
+          <KeepAlive>
+            <component v-if="route?.meta?.keepAlive" :is="Component" :key="route.name" />
+          </KeepAlive>
+          <!-- Para rotas sem keepAlive, renderiza fora do cache -->
+          <Transition name="route-fade" mode="out-in">
+            <component v-if="!route?.meta?.keepAlive" :is="Component" :key="route.fullPath" />
+          </Transition>
         </RouterView>
       </main>
     </div>

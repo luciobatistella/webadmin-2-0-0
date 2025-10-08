@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onActivated, watch, nextTick } from 'vue'
 import { ChatBubbleLeftEllipsisIcon } from '@heroicons/vue/24/outline'
 import Breadcrumbs from '@/components/Breadcrumbs.vue'
 import ClientActions from '@/components/ClientActions.vue'
-import { listCooperados, getCooperado, paginateCooperadosDocuments, countCooperadosStatistics, listCooperadoPayments, listCooperadoCheckins, updateCooperado } from '@/services/cooperados'
+import { listCooperados, getCooperado, paginateCooperadosDocuments, countCooperadosStatistics, listCooperadoPayments, listCooperadoCheckins, updateCooperado, listFuncoesCooperados } from '@/services/cooperados'
 import SidePanel from '@/components/SidePanel.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { COOPERADO_DETAIL_VIEW_MODE } from '@/config/featureFlags'
@@ -15,11 +15,119 @@ defineOptions({ name: 'CooperadosView' })
 
 const rows = ref<Row[]>([])
 const loading = ref(false)
+const loadingMore = ref(false)
+// Novo modo de carregamento bloqueante com progresso (%)
+const aggregating = ref(false)
+const progressPercent = ref(0)
+const progressLabel = ref('')
+const progressTotalHint = ref<number | null>(null)
+let currentAbort: AbortController | null = null
 const page = ref(1)
-const limit = ref(18)
+  const limit = ref(18)
 const total = ref(0)
 // Rastreia a última página carregada do backend quando usamos paginação oficial
 const lastLoadedPage = ref(1)
+// Modo híbrido: usa backend oficial (limit fixo) e fatia local para 18/36/etc
+const officialHybridMode = ref(false)
+// Sinaliza que o próximo load deve ignorar a cache
+const ignoreCacheOnce = ref(false)
+
+// Debounce de recarregamento para evitar tempestade de requisições
+let _loadTimer: any = null
+function scheduleLoad(delay = 300) {
+  try { if (_loadTimer) clearTimeout(_loadTimer) } catch {}
+  _loadTimer = setTimeout(() => {
+    _loadTimer = null
+    load()
+  }, Math.max(0, Number(delay) || 0))
+}
+
+// Cache leve para evitar recargas com os mesmos filtros (persistido em sessionStorage)
+type CacheEntry = {
+  k: string
+  mode: 'docsOR' | 'local' | 'official' | 'hybrid'
+  at: number
+  ttl: number
+  page?: number
+  limit?: number
+  rows?: Row[]
+  items?: Row[]
+  total?: number
+  remoteCounts?: { all: number; active: number; inactive: number; blocked: number; pending: number }
+}
+const LIST_CACHE_KEY = 'cooperados:listCache:v3'
+const LIST_CACHE_TTL = 60 * 60 * 1000 // 60 minutos (cache por sessão mais longo)
+const LIST_CACHE_CAP = 6 // máximo de entradas a manter
+const listCache = ref<Record<string, CacheEntry>>({})
+
+function loadCacheFromSession() {
+  try {
+    const raw = sessionStorage.getItem(LIST_CACHE_KEY)
+    if (!raw) return
+    const obj = JSON.parse(raw || '{}')
+    if (obj && typeof obj === 'object') listCache.value = obj
+  } catch { /* noop */ }
+}
+function saveCacheToSession() {
+  try {
+    const entries = Object.values(listCache.value)
+    // Capacidade: mantém os mais recentes
+    entries.sort((a,b) => b.at - a.at)
+    const trimmed = entries.slice(0, LIST_CACHE_CAP)
+    const map: Record<string, CacheEntry> = {}
+    for (const e of trimmed) map[e.k] = e
+    sessionStorage.setItem(LIST_CACHE_KEY, JSON.stringify(map))
+    listCache.value = map
+  } catch { /* noop */ }
+}
+
+function clearCooperadosCacheAndReload() {
+  try {
+    sessionStorage.removeItem(LIST_CACHE_KEY)
+    sessionStorage.removeItem('cooperados:viewState')
+    sessionStorage.removeItem('cooperados:restore')
+    sessionStorage.removeItem('cooperados:last')
+  } catch { /* noop */ }
+  listCache.value = {}
+  saveCacheToSession()
+  // Ignora cache no próximo carregamento
+  ignoreCacheOnce.value = true
+  page.value = 1
+  load()
+}
+function makeFiltersSignature() {
+  // Assinatura somente dos filtros (sem paginação) — igual para docsOR/local
+  const sig = {
+    q: q.value,
+    sortBy: sortBy.value,
+    sexo: sexoFilter.value,
+    estado: estadoFilter.value,
+    cidade: cidadeFilter.value,
+    regiao: regiaoFilter.value,
+    status: statusFilter.value,
+    opStatusFilter: opStatusFilter.value,
+    useOpStatusTabs: useOpStatusTabs.value,
+    opTab: opTab.value,
+    funcao: funcaoFilter.value,
+    vencFoto: vencFotoPerfil.value,
+    vencAtestado: vencAtestado.value,
+    vencAntecedentes: vencAntecedentes.value,
+    vencUniforme: vencUniforme.value,
+    // currentTab intencionalmente fora do cache base em modos locais,
+    // para permitir reuso do dataset entre as abas (Todos/Ativos/etc).
+  }
+  return JSON.stringify(sig)
+}
+function makeFullSignature(includePageLimit = false) {
+  const base = JSON.parse(makeFiltersSignature())
+  if (includePageLimit) {
+    ;(base as any).page = page.value
+    ;(base as any).limit = limit.value
+  }
+  // Em modos oficiais/híbridos, a aba (Situação) altera o filtro remoto; inclua currentTab
+  ;(base as any).currentTab = currentTab.value
+  return JSON.stringify(base)
+}
 
 const q = ref('')
 const sortBy = ref<'nome'|'mais_recentes'|'codigo'>('mais_recentes')
@@ -40,10 +148,29 @@ const vencUniforme = ref(false)
 
 const docFiltersActive = computed(() => vencFotoPerfil.value || vencAtestado.value || vencAntecedentes.value || vencUniforme.value)
 
+// Quando usamos a agregação via backend (OR entre flags de documentos), marcamos este flag
+// para não re-aplicar o filtro de documentos no cliente (evitando duplo filtro)
+const appliedDocsORBackend = ref(false)
+
 const showLocation = ref(false)
 const route = useRoute()
 const router = useRouter()
 const viewMode = computed(() => (route.query.view || COOPERADO_DETAIL_VIEW_MODE))
+
+// Alguns filtros não existem no backend; quando ativos, precisamos buscar todas as páginas e paginar localmente
+const hasClientOnlyFilterActive = computed(() => {
+  return !!(
+    // Dropdown de status operacional (cliente)
+    opStatusFilter.value ||
+    // Status de completude (cliente)
+    statusFilter.value === 'completo' || statusFilter.value === 'incompleto' ||
+    // Localização e função (cliente)
+    String(estadoFilter.value || '') ||
+    String(cidadeFilter.value || '') ||
+    String(regiaoFilter.value || '') ||
+    String(funcaoFilter.value || '')
+  )
+})
 
 // Persistência de estado (filtros/página) via querystring e destaque do último visitado
 const initializing = ref(true)
@@ -56,28 +183,8 @@ function toBool(v: unknown): boolean {
 }
 
 function syncFromQuery() {
-  syncing.value = true
-  const qy = route.query as Record<string, any>
-  if (qy.q != null) q.value = String(qy.q)
-  if (qy.sort === 'nome' || qy.sort === 'codigo' || qy.sort === 'mais_recentes') sortBy.value = qy.sort
-  if (qy.tab === 'todos' || qy.tab === 'ativos' || qy.tab === 'inativos' || qy.tab === 'bloqueados' || qy.tab === 'pendentes') currentTab.value = qy.tab
-  if (qy.page != null && !Number.isNaN(Number(qy.page))) page.value = Math.max(1, Number(qy.page))
-  if (qy.limit != null && !Number.isNaN(Number(qy.limit))) limit.value = Math.max(1, Number(qy.limit))
-  if (qy.sexo === 'M' || qy.sexo === 'F' || qy.sexo === '') sexoFilter.value = String(qy.sexo)
-  if (qy.uf != null) estadoFilter.value = String(qy.uf)
-  if (qy.cidade != null) cidadeFilter.value = String(qy.cidade)
-  if (qy.regiao != null) regiaoFilter.value = String(qy.regiao)
-  if (qy.status === 'nenhum' || qy.status === 'completo' || qy.status === 'incompleto') statusFilter.value = String(qy.status)
-  if (typeof qy.op === 'string') opStatusFilter.value = String(qy.op)
-  if (qy.opTabs != null) useOpStatusTabs.value = toBool(qy.opTabs)
-  if (typeof qy.opTab === 'string') opTab.value = String(qy.opTab)
-  if (typeof qy.funcao === 'string') funcaoFilter.value = String(qy.funcao)
-  if (qy.vFoto != null) vencFotoPerfil.value = toBool(qy.vFoto)
-  if (qy.vAtestado != null) vencAtestado.value = toBool(qy.vAtestado)
-  if (qy.vAntecedentes != null) vencAntecedentes.value = toBool(qy.vAntecedentes)
-  if (qy.vUniforme != null) vencUniforme.value = toBool(qy.vUniforme)
-  // Libera os watchers somente no próximo tick, evitando resets de página
-  nextTick(() => { syncing.value = false })
+  // URL desativada: não sincroniza estado por querystring
+  syncing.value = false
 }
 
 function buildQueryFromState() {
@@ -138,14 +245,38 @@ const selectedCooperadoId = ref<number | null>(null)
 const detailLoading = ref(false)
 const detail = ref<Row | null>(null)
 const editing = ref(false)
-const activeDetailTab = ref<'perfil' | 'documentos' | 'pagamentos' | 'presencas'>('perfil')
+const activeDetailTab = ref<'perfil' | 'documentos' | 'financeiro' | 'presencas' | 'alertas' | 'ofertas' | 'agenda'>('perfil')
 const payments = ref<Row[]>([])
 const checkins = ref<Row[]>([])
+// Menu de opções no detalhe
+const showDetailOptions = ref(false)
 
 // Filtro por função
 const funcaoFilter = ref('')
 const FILTRO_SEM_FUNCAO = '__SEM_FUNCAO__'
 const FILTRO_COM_FUNCAO = '__COM_FUNCAO__'
+const funcoesOptions = ref<Array<{ id: number; name: string }>>([])
+const funcoesLoading = ref(false)
+const selectedFuncaoId = ref<number | null>(null)
+
+async function ensureFuncoesLoaded(force = false) {
+  try {
+    if (!force && funcoesOptions.value.length > 0) return
+    funcoesLoading.value = true
+    const list = await listFuncoesCooperados()
+    funcoesOptions.value = Array.isArray(list) ? list : []
+  } catch (e) {
+    console.warn('[cooperados.funcoes] falha ao carregar', e)
+    funcoesOptions.value = funcoesOptions.value || []
+  } finally {
+    funcoesLoading.value = false
+  }
+}
+
+async function onToggleFuncFilter() {
+  showFuncFilter.value = !showFuncFilter.value
+  if (showFuncFilter.value) await ensureFuncoesLoaded(false)
+}
 
 // Tabs (Situação)
 const currentTab = ref('todos') // 'todos' | 'ativos' | 'inativos' | 'bloqueados' | 'pendentes'
@@ -158,12 +289,20 @@ const remoteCounts = ref<{ all: number; active: number; inactive: number; blocke
 const showStatusFilter = ref(false)
 const statusFilter = ref('nenhum') // 'nenhum' | 'completo' | 'incompleto'
 const sexoFilter = ref('')         // 'M' | 'F' | ''
-const estadoFilter = ref('SP')      // UF ou nome
+const estadoFilter = ref('')      // UF (vazio = todas)
 const cidadeFilter = ref('')
 const regiaoFilter = ref('')
 
 // Dropdown combinado (Ordenação + Sexo + Documentos)
 const showCombined = ref(false)
+
+// Logging auxiliar para depurar filtros de documentos
+function logDocs(...args: any[]) {
+  try {
+    // Ajuste aqui caso queira condicionar logs a um flag de ambiente / localStorage
+    console.log('[cooperados.docs]', ...args)
+  } catch {}
+}
 
 
 // Mapa UF -> Região
@@ -171,14 +310,16 @@ const UF_TO_REGIAO: Record<string,string> = { AC: 'N', AP: 'N', AM: 'N', PA: 'N'
 const UF_OPTIONS = Object.keys(UF_TO_REGIAO)
 // Macro-regiões do Brasil (fallback)
 const MACRO_REGIOES: string[] = ['Norte', 'Nordeste', 'Centro-Oeste', 'Sudeste', 'Sul']
+// Regiões específicas de SP (alinhadas com a API)
+const SP_REGION_LABELS = ['Zona Norte','Zona Oeste','Zona Sul','Zona Leste','Grande ABC','Campinas','Vale','Baixada']
 // Regiões por UF (ex.: zonas de São Paulo)
 const REGIOES_POR_UF = {
-  SP: ['Zona Norte', 'Zona Sul', 'Zona Leste', 'Zona Oeste', 'Centro']
+  SP: SP_REGION_LABELS
 }
 
 const regionOptions = computed(() => {
   if (String(estadoFilter.value).toUpperCase() === 'SP') {
-    return (REGIOES_POR_UF.SP || []).map(label => ({ label, value: label }))
+    return (REGIOES_POR_UF.SP || SP_REGION_LABELS).map(label => ({ label, value: label }))
   }
   return MACRO_REGIOES.map(r => ({ label: r, value: r }))
 })
@@ -207,8 +348,8 @@ function isCompleto(it: Row) {
 
 
 function mapStatusTabToApi(): number | undefined {
-  // status: number (null|0|1|2|3|4) (Todos|Ativo|Inativo|Bloqueado|Pendente)
-  if (currentTab.value === 'todos') return undefined // não enviar para "todos"
+  // status: 0=Todos, 1=Ativo, 2=Inativo, 3=Bloqueado, 4=Pendente
+  if (currentTab.value === 'todos') return 0
   if (currentTab.value === 'ativos') return 1
   if (currentTab.value === 'inativos') return 2
   if (currentTab.value === 'bloqueados') return 3
@@ -216,7 +357,7 @@ function mapStatusTabToApi(): number | undefined {
   return undefined
 }
 
-function buildApiParams(opts?: { includeDocFilters?: boolean }): URLSearchParams {
+function buildApiParams(opts?: { includeDocFilters?: boolean; forStatistics?: boolean }): URLSearchParams {
   const p = new URLSearchParams()
   // Backend é 0-based; UI é 1-based
   p.append('page', String(page.value - 1))
@@ -225,19 +366,44 @@ function buildApiParams(opts?: { includeDocFilters?: boolean }): URLSearchParams
   if (q.value) {
     const raw = String(q.value).trim()
     const onlyDigits = raw.replace(/\D+/g, '')
-    const looksLikeCpf = /\d{3}\.\d{3}\.\d{3}-\d{2}|\d{11}/.test(raw)
-    if (looksLikeCpf) p.append('cpf', onlyDigits.length === 11 ? onlyDigits : raw)
-    else if (/^\d{1,6}$/.test(onlyDigits)) p.append('matricula', onlyDigits)
-    else p.append('nome', raw)
+    // Regra: 11 dígitos (ou formato 000.000.000-00) => CPF
+    const looksLikeCpf = /^(\d{3}\.\d{3}\.\d{3}-\d{2}|\d{11})$/.test(raw)
+    if (looksLikeCpf) {
+      p.append('cpf', onlyDigits.length === 11 ? onlyDigits : raw)
+    } else if (/^\d+$/.test(raw)) {
+      // Qualquer número (>=1 dígito) que não seja CPF => matrícula
+      p.append('matricula', onlyDigits)
+    } else {
+      // Caso geral => nome
+      p.append('nome', raw)
+    }
   }
   if (sexoFilter.value === 'M' || sexoFilter.value === 'F') {
     p.append('sexo', String(sexoFilter.value))
   }
-  // Status geral (Situação) só é enviado quando NÃO estamos usando abas por status operacional
-  const statusNum = mapStatusTabToApi()
-  if (!useOpStatusTabs.value && typeof statusNum === 'number' && statusNum > 0) {
-    p.append('status', String(statusNum))
+  // Para estatísticas, alguns backends aceitam sexom/sexof para filtragem
+  if (opts?.forStatistics) {
+    if (!sexoFilter.value) {
+      // quando não há filtro de sexo, incluímos ambos (se suportado)
+      p.append('sexom', 'true')
+      p.append('sexof', 'true')
+    } else if (sexoFilter.value === 'M') {
+      p.append('sexom', 'true')
+    } else if (sexoFilter.value === 'F') {
+      p.append('sexof', 'true')
+    }
   }
+  // Abas de situação -> status oficial (1=Ativo,2=Inativo,3=Bloqueado,4=Pendente). Para "Todos" omite ou 0.
+  const st = mapStatusTabToApi()
+  // Só envia status para o backend quando for um valor específico (>0). Para "Todos", não enviar.
+  // IMPORTANTE: para estatísticas, não enviar 'status' — o endpoint devolve todos os contadores
+  if (!opts?.forStatistics && st != null && Number(st) > 0) {
+    p.append('status', String(st))
+  }
+  // Ordenação oficial: não enviar (ordenaremos no cliente para evitar incompatibilidades)
+  // nome => nome, codigo => id, mais_recentes => id (no cliente)
+  // função: filtro apenas no cliente (não faz parte dos parâmetros oficiais)
+  // NÃO enviar status: alguns ambientes não suportam esse parâmetro; filtramos no cliente
   // Vencimentos (apenas enviar quando true) — opcional
   const includeDocs = opts?.includeDocFilters !== false
   if (includeDocs) {
@@ -246,22 +412,31 @@ function buildApiParams(opts?: { includeDocFilters?: boolean }): URLSearchParams
     if (vencAntecedentes.value) p.append('antecedentesVencimento', 'true')
     if (vencUniforme.value) p.append('uniformeVencimento', 'true')
   }
-  // orderBy
-  if (sortBy.value === 'nome') p.append('orderBy', 'nome')
-  else if (sortBy.value === 'codigo') p.append('orderBy', 'matricula')
-  else p.append('orderBy', 'matricula')
+  // NÃO enviar orderBy: ordenamos no cliente
+  // Filtros de localização (alguns backends aceitam em estatísticas)
+  if (opts?.forStatistics) {
+    if (estadoFilter.value) p.append('uf', String(estadoFilter.value))
+    if (cidadeFilter.value) p.append('cidade', String(cidadeFilter.value))
+    if (regiaoFilter.value) p.append('regiao', String(regiaoFilter.value))
+  }
   return p
 }
 
 // Busca incremental de todas as páginas para paginação local (suporta grandes volumes)
-async function fetchAllForLocalPaging(): Promise<Row[]> {
+async function fetchAllForLocalPaging(
+  opts?: { signal?: AbortSignal; onProgress?: (pct: number, info?: any) => void; expectedTotal?: number }
+): Promise<Row[]> {
   // Não enviamos filtros de documentos para o backend (OR aplicado localmente ou por abas)
   const baseParams = buildApiParams({ includeDocFilters: false })
+  // No modo local, não queremos restringir por status no backend; agregamos tudo e filtramos no cliente
+  baseParams.delete('status')
   baseParams.set('page', '0')
 
-  const perPageCandidates = ['500', '250', '100']
+  // Tentar limites maiores primeiro
+  const perPageCandidates = ['1000', '500', '200', '100']
   const maxRecords = 12000 // trava de segurança para não baixar infinitamente
   const aggregated: Row[] = []
+  const seen = new Set<string | number>()
 
   let chosenLimit: string | null = null
   let totalServer = 0
@@ -270,11 +445,24 @@ async function fetchAllForLocalPaging(): Promise<Row[]> {
     try {
       const p0 = new URLSearchParams(baseParams as any)
       p0.set('limit', lim)
-      const resp0 = await paginateCooperadosDocuments(p0)
+      const resp0 = await paginateCooperadosDocuments(p0, { signal: opts?.signal })
       const data0 = (resp0?.data || []) as Row[]
       totalServer = Number(resp0?.total || data0.length || 0)
-      aggregated.push(...data0)
+      for (const it of data0) {
+        const id = resolveCooperadoId(it)
+        if (id == null || !seen.has(id)) {
+          if (id != null) seen.add(id)
+          aggregated.push(it)
+        }
+      }
       chosenLimit = lim
+      // progresso inicial
+      if (opts?.onProgress) {
+        const base = Number(opts?.expectedTotal || 0)
+        const denom = base > 0 ? base : totalServer
+        const pct = denom > 0 ? Math.min(100, Math.round((aggregated.length / denom) * 100)) : 0
+        try { opts.onProgress(pct, { page: 0, perPage: Number(lim), received: aggregated.length, total: totalServer }) } catch {}
+      }
       break
     } catch (e) {
       // tenta próximo limite
@@ -288,22 +476,41 @@ async function fetchAllForLocalPaging(): Promise<Row[]> {
   }
 
   const perPage = Number(chosenLimit)
-  const totalPages = Math.max(1, Math.ceil(totalServer / perPage))
-
-  // Já carregamos a página 0; buscar as demais
-  for (let pageIdx = 1; pageIdx < totalPages; pageIdx++) {
-    // Se por algum motivo já atingiu o máximo, para
+  // Quando o backend não informa total, seguimos buscando até vir vazio ou não aumentar.
+  const totalPagesHint = Math.max(1, Math.ceil(totalServer / perPage))
+  const hardPageCap = 300
+  let lastSize = aggregated.length
+  for (let pageIdx = 1; pageIdx < Math.min(totalPagesHint + 50, hardPageCap); pageIdx++) {
+    if (opts?.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
     if (aggregated.length >= maxRecords) break
     try {
       const p = new URLSearchParams(baseParams as any)
       p.set('page', String(pageIdx))
       p.set('limit', String(perPage))
-      const resp = await paginateCooperadosDocuments(p)
+      const resp = await paginateCooperadosDocuments(p, { signal: opts?.signal })
       const data = (resp?.data || []) as Row[]
       if (!Array.isArray(data) || data.length === 0) break
-      aggregated.push(...data)
+      for (const it of data) {
+        const id = resolveCooperadoId(it)
+        if (id == null || !seen.has(id)) {
+          if (id != null) seen.add(id)
+          aggregated.push(it)
+        }
+      }
+      if (opts?.onProgress) {
+        const base = Number(opts?.expectedTotal || 0)
+        const denom = base > 0 ? base : Math.max(1, totalServer)
+        const pct = totalServer > 0 || base > 0
+          ? Math.min(100, Math.round((aggregated.length / denom) * 100))
+          : Math.min(100, Math.round(((pageIdx + 1) / Math.max(1, totalPagesHint)) * 100))
+        try { opts.onProgress(pct, { page: pageIdx, perPage, received: aggregated.length, total: totalServer }) } catch {}
+      }
+      // Se não cresceu, assumimos que não há mais páginas úteis
+      if (aggregated.length === lastSize) break
+      lastSize = aggregated.length
+      // Se o backend informar total e já atingimos, paramos
+      if (totalServer > 0 && aggregated.length >= totalServer) break
     } catch (e) {
-      // Se falhar uma página, tenta a próxima; não aborta a lista já obtida
       continue
     }
   }
@@ -312,46 +519,74 @@ async function fetchAllForLocalPaging(): Promise<Row[]> {
 }
 
 // Agrega via backend os documentos com OR entre as flags ativas de vencimento
-async function fetchAllForLocalDocsOR(): Promise<Row[]> {
+async function fetchAllForLocalDocsOR(
+  opts?: { signal?: AbortSignal; onProgress?: (pct: number, info?: any) => void; expectedTotal?: number }
+): Promise<Row[]> {
+  logDocs('fetchAllForLocalDocsOR:start')
   const flags: Array<{ key: string; set: (p: URLSearchParams) => void }> = []
   if (vencFotoPerfil.value) flags.push({ key: 'fotoPerfilVencimento', set: (p) => p.set('fotoPerfilVencimento', 'true') })
   if (vencAtestado.value) flags.push({ key: 'atestadoVencimento', set: (p) => p.set('atestadoVencimento', 'true') })
   if (vencAntecedentes.value) flags.push({ key: 'antecedentesVencimento', set: (p) => p.set('antecedentesVencimento', 'true') })
   if (vencUniforme.value) flags.push({ key: 'uniformeVencimento', set: (p) => p.set('uniformeVencimento', 'true') })
+  logDocs('fetchAllForLocalDocsOR:flags', flags.map(f => f.key))
 
-  if (flags.length === 0) return []
+  if (flags.length === 0) { logDocs('fetchAllForLocalDocsOR:no-flags'); return [] }
 
   const maxRecords = 12000
-  const perPageCandidates = ['500', '250', '100']
+  const perPageCandidates = ['1000', '500', '200', '100']
   const merged: Row[] = []
   const seen = new Set<string | number>()
 
   // Para cada flag ativa, percorre a paginação completa e agrega resultados
   for (const f of flags) {
+    logDocs('flag:start', f.key)
     // Base sem outras flags para esta rodada
-    const base = buildApiParams({ includeDocFilters: false })
+  const base = buildApiParams({ includeDocFilters: false })
+  // No modo local (docs OR), nunca limitar por status no backend
+  base.delete('status')
     // Copia e injeta a flag
     const baseWithFlag = new URLSearchParams(base as any)
     f.set(baseWithFlag)
     baseWithFlag.set('page', '0')
 
     let chosenLimit: string | null = null
+    let chosenValue: 'true' | null = null
     let totalServer = 0
-    // tentativa progressiva de limites
+    // Tenta apenas boolean true, conforme API
     for (const lim of perPageCandidates) {
       try {
         const p0 = new URLSearchParams(baseWithFlag as any)
+        p0.set(f.key, 'true')
         p0.set('limit', lim)
-        const resp0 = await paginateCooperadosDocuments(p0)
+        logDocs('try:first-page', { flag: f.key, val: 'true', limit: lim })
+  const resp0 = await paginateCooperadosDocuments(p0, { signal: opts?.signal })
         const data0 = (resp0?.data || []) as Row[]
         totalServer = Number(resp0?.total || data0.length || 0)
-        for (const it of data0) {
-          const id = resolveCooperadoId(it)
-          if (id != null && !seen.has(id)) { seen.add(id); merged.push(it) }
+        logDocs('first-page:result', { flag: f.key, val: 'true', limit: lim, totalServer, received: Array.isArray(data0) ? data0.length : 0 })
+        if (Array.isArray(data0) && data0.length > 0) {
+          for (const it of data0) {
+            const id = resolveCooperadoId(it)
+            if (id != null && !seen.has(id)) { seen.add(id); merged.push(it) }
+          }
+          if (opts?.onProgress) {
+            const base = Number(opts?.expectedTotal || 0)
+            const denom = base > 0 ? base : totalServer
+            const pct = denom > 0 ? Math.min(100, Math.round((merged.length / denom) * 100)) : 0
+            try { opts.onProgress(pct, { flag: f.key, page: 0, perPage: Number(lim), received: merged.length, total: totalServer }) } catch {}
+          }
+          chosenLimit = lim
+          chosenValue = 'true'
+          logDocs('first-page:chosen', { flag: f.key, chosenValue: 'true', chosenLimit: lim, totalServer })
+          break
         }
-        chosenLimit = lim
-        break
+        if (totalServer > 0) {
+          chosenLimit = lim
+          chosenValue = 'true'
+          logDocs('first-page:chosen-by-total', { flag: f.key, chosenValue: 'true', chosenLimit: lim, totalServer })
+          break
+        }
       } catch (e) {
+        logDocs('first-page:error', { flag: f.key, val: 'true', limit: lim, error: (e as any)?.message || String(e) })
         continue
       }
     }
@@ -361,21 +596,33 @@ async function fetchAllForLocalDocsOR(): Promise<Row[]> {
     const perPage = Number(chosenLimit)
     const totalPages = Math.max(1, Math.ceil(totalServer / perPage))
     for (let pageIdx = 1; pageIdx < totalPages; pageIdx++) {
+      if (opts?.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
       if (merged.length >= maxRecords) break
       try {
         const p = new URLSearchParams(baseWithFlag as any)
         p.set('page', String(pageIdx))
         p.set('limit', String(perPage))
-        const resp = await paginateCooperadosDocuments(p)
+        if (chosenValue) p.set(f.key, chosenValue)
+        logDocs('page:request', { flag: f.key, pageIdx, perPage, chosenValue })
+        const resp = await paginateCooperadosDocuments(p, { signal: opts?.signal })
         const data = (resp?.data || []) as Row[]
         if (!Array.isArray(data) || data.length === 0) break
         for (const it of data) {
           const id = resolveCooperadoId(it)
           if (id != null && !seen.has(id)) { seen.add(id); merged.push(it) }
         }
+        if (opts?.onProgress) {
+          const base = Number(opts?.expectedTotal || 0)
+          const denom = base > 0 ? base : Math.max(1, totalServer)
+          const pct = totalServer > 0 || base > 0
+            ? Math.min(100, Math.round((merged.length / denom) * 100))
+            : Math.min(100, Math.round(((pageIdx + 1) / Math.max(1, totalPages)) * 100))
+          try { opts.onProgress(pct, { flag: f.key, page: pageIdx, perPage, received: merged.length, total: totalServer }) } catch {}
+        }
       } catch (e) { continue }
     }
 
+    logDocs('flag:done', { flag: f.key, mergedCount: merged.length, totalServer, chosenValue, chosenLimit })
     if (merged.length >= maxRecords) break
   }
 
@@ -383,69 +630,314 @@ async function fetchAllForLocalDocsOR(): Promise<Row[]> {
 }
 
 async function load() {
+  // Cancelar buscas anteriores
+  if (currentAbort) { try { currentAbort.abort() } catch {} }
+  currentAbort = new AbortController()
+  const signal = currentAbort.signal
   loading.value = true
+  aggregating.value = false
+  progressPercent.value = 0
+  progressLabel.value = ''
+  try { if (localStorage.getItem('debug:cooperados') === '1') console.log('[CooperadosView.load] start', { page: page.value, limit: limit.value, currentTab: currentTab.value, isOfficialPaged: isOfficialPaged.value, officialHybridMode: officialHybridMode.value }) } catch {}
   try {
     const officialAllowed = [1, 10, 20, 50, 100]
+  // Paginação oficial do backend usa estes limites
     const canUseOfficial = officialAllowed.includes(Number(limit.value))
     const useLocalDocsOR = docFiltersActive.value
-    const useLocalOpTabs = useOpStatusTabs.value
+    // Abas de situação: usar backend (status) quando possível; só local se houver outros filtros client-only
+    const useLocalOpTabs = false
+    const useLocalClientOnly = hasClientOnlyFilterActive.value
+  // por padrão, considere que não houve filtro de documentos aplicado via backend
+  appliedDocsORBackend.value = false
+
+    // Tenta cache por modo e assinatura de filtros
+    const now = Date.now()
+    const baseKey = makeFiltersSignature()
+    // Modos: docsOR, local (op tabs/client-only), official (limit oficial), hybrid (ui limit com backend 100)
+    let mode: CacheEntry['mode'] = 'official'
+  if (useLocalDocsOR) mode = 'docsOR'
+  else if (useLocalClientOnly) mode = 'local'
+  else if (canUseOfficial) mode = 'official'
+  else mode = 'hybrid'
+    // Estabiliza o modo híbrido antes das próximas reações/computeds
+    officialHybridMode.value = (mode === 'hybrid')
+  const cacheKey = `${mode}:${mode === 'official' || mode === 'hybrid' ? makeFullSignature(true) : baseKey}`
+    const entry = listCache.value[cacheKey]
+    if (!ignoreCacheOnce.value && entry && now - entry.at < (entry.ttl || LIST_CACHE_TTL)) {
+      // Hidrata da cache e retorna
+  if (mode === 'hybrid' && Array.isArray(entry.items)) rows.value = entry.items
+      else if (Array.isArray(entry.rows)) rows.value = entry.rows
+      total.value = Number(entry.total || 0)
+      if (entry.remoteCounts) remoteCounts.value = entry.remoteCounts
+      // Mantém paginação atual; para modos locais, totalPages recalcula do filteredRows
+      loading.value = false
+      aggregating.value = false
+      progressPercent.value = 100
+      progressLabel.value = 'Em cache'
+  try { console.log('[CooperadosView.load] cache-hit', { mode, count: rows.value.length, total: total.value }) } catch {}
+      return
+    }
 
     if (useLocalDocsOR) {
       // Quando filtros de documentos estão ativos, agregamos via backend (OR entre flags)
-      const list = await fetchAllForLocalDocsOR()
+      logDocs('load:docsOR:start')
+      loadingMore.value = false
+      aggregating.value = true
+      progressPercent.value = 2
+      progressLabel.value = 'Preparando filtros…'
+      // Busca total esperado via estatísticas, para exibir progresso real (itens baixados/total)
+      try {
+        const countParams = buildApiParams({ includeDocFilters: false, forStatistics: true })
+        countParams.delete('page')
+        countParams.delete('limit')
+        const stats = await countCooperadosStatistics(countParams)
+        // Preenche totais das tabs/paginação imediatamente
+        remoteCounts.value = {
+          all: Number(stats?.all || 0) || 0,
+          active: Number(stats?.active || 0) || 0,
+          inactive: Number(stats?.inactive || 0) || 0,
+          blocked: Number(stats?.blocked || 0) || 0,
+          pending: Number(stats?.pending || 0) || 0,
+        }
+        progressTotalHint.value = Number(stats?.all || 0) || null
+      } catch { progressTotalHint.value = null }
+      let docsORServerApplied = false
+      const list = await fetchAllForLocalDocsOR({
+        signal,
+        expectedTotal: progressTotalHint.value || undefined,
+        onProgress: (pct, info) => {
+          progressPercent.value = Math.max(2, Math.min(99, pct))
+          const received = Number(info?.received || 0)
+          const total = Number(progressTotalHint.value || info?.total || 0)
+          progressLabel.value = total > 0
+            ? `Carregando ${received.toLocaleString('pt-BR')} de ${total.toLocaleString('pt-BR')} (${progressPercent.value}%)…`
+            : `Carregando (${progressPercent.value}%)…`
+        }
+      })
+      docsORServerApplied = Array.isArray(list) && list.length > 0
+      if (!Array.isArray(list) || list.length === 0) {
+        try {
+          logDocs('load:docsOR:fallback-local')
+          const alt = await fetchAllForLocalPaging({
+            signal,
+            expectedTotal: progressTotalHint.value || undefined,
+            onProgress: (pct, info) => {
+              progressPercent.value = Math.max(2, Math.min(99, pct))
+              const received = Number(info?.received || 0)
+              const total = Number(progressTotalHint.value || info?.total || 0)
+              progressLabel.value = total > 0
+                ? `Carregando ${received.toLocaleString('pt-BR')} de ${total.toLocaleString('pt-BR')} (${progressPercent.value}%)…`
+                : `Carregando (${progressPercent.value}%)…`
+            }
+          })
+          rows.value = alt
+          total.value = alt.length
+          docsORServerApplied = false
+        } catch {}
+      }
+      if (!rows.value.length) {
+        rows.value = list
+        total.value = list.length
+      }
+      lastLoadedPage.value = page.value
+      appliedDocsORBackend.value = !!docsORServerApplied
+      loadingMore.value = false
+      aggregating.value = false
+      progressPercent.value = 100
+      progressLabel.value = 'Concluído'
+  try { console.log('[CooperadosView.load] docsOR', { count: rows.value.length, total: total.value, appliedDocsORBackend: appliedDocsORBackend.value }) } catch {}
+
+      // Contadores oficiais já preenchidos acima via estatísticas
+      // Salva cache
+      listCache.value[cacheKey] = {
+        k: cacheKey, mode, at: Date.now(), ttl: LIST_CACHE_TTL,
+        rows: rows.value, total: total.value, remoteCounts: remoteCounts.value
+      }
+      saveCacheToSession()
+  } else if (useLocalClientOnly) {
+      // Paginação local: quando usamos abas operacionais, filtros só do cliente
+      // OU quando o limit não é um dos oficiais, buscamos TODAS as páginas e paginamos localmente
+      loadingMore.value = false
+      aggregating.value = true
+      progressPercent.value = 2
+      progressLabel.value = 'Carregando…'
+      // total esperado via estatísticas
+      try {
+        const countParams = buildApiParams({ includeDocFilters: false, forStatistics: true })
+        countParams.delete('page')
+        countParams.delete('limit')
+        const stats = await countCooperadosStatistics(countParams)
+        remoteCounts.value = {
+          all: Number(stats?.all || 0) || 0,
+          active: Number(stats?.active || 0) || 0,
+          inactive: Number(stats?.inactive || 0) || 0,
+          blocked: Number(stats?.blocked || 0) || 0,
+          pending: Number(stats?.pending || 0) || 0,
+        }
+        progressTotalHint.value = Number(stats?.all || 0) || null
+      } catch { progressTotalHint.value = null }
+      const list = await fetchAllForLocalPaging({
+        signal,
+        expectedTotal: progressTotalHint.value || undefined,
+        onProgress: (pct, info) => {
+          progressPercent.value = Math.max(2, Math.min(99, pct))
+          const received = Number(info?.received || 0)
+          const total = Number(progressTotalHint.value || info?.total || 0)
+          progressLabel.value = total > 0
+            ? `Carregando ${received.toLocaleString('pt-BR')} de ${total.toLocaleString('pt-BR')} (${progressPercent.value}%)…`
+            : `Carregando (${progressPercent.value}%)…`
+        }
+      })
       rows.value = list
       total.value = list.length
       lastLoadedPage.value = page.value
+      appliedDocsORBackend.value = false
+      loadingMore.value = false
+      aggregating.value = false
+      progressPercent.value = 100
+      progressLabel.value = 'Concluído'
+  try { console.log('[CooperadosView.load] localPaging', { count: rows.value.length, total: total.value, page: page.value, limit: limit.value }) } catch {}
 
-      // Contadores oficiais com os mesmos filtros (sem page/limit e sem doc flags)
-      const countParams = buildApiParams({ includeDocFilters: false })
-      countParams.delete('page')
-      countParams.delete('limit')
-      remoteCounts.value = await countCooperadosStatistics(countParams)
-    } else if (useLocalOpTabs) {
-      // Paginação local: buscar TODAS as páginas e filtrar localmente por abas operacionais
-      const list = await fetchAllForLocalPaging()
-      rows.value = list
-      total.value = list.length
-      lastLoadedPage.value = page.value
-
-      // Contadores oficiais com os mesmos filtros (sem page/limit)
-      const countParams = buildApiParams({ includeDocFilters: false })
-      countParams.delete('page')
-      countParams.delete('limit')
-      remoteCounts.value = await countCooperadosStatistics(countParams)
-    } else if (canUseOfficial) {
+      // Contadores oficiais já preenchidos acima via estatísticas
+      // Salva cache
+      listCache.value[cacheKey] = {
+        k: cacheKey, mode, at: Date.now(), ttl: LIST_CACHE_TTL,
+        rows: rows.value, total: total.value, remoteCounts: remoteCounts.value
+      }
+      saveCacheToSession()
+  } else if (canUseOfficial) {
       const p = buildApiParams()
       // Chamada oficial de paginação
       const resp = await paginateCooperadosDocuments(p)
       rows.value = (resp?.data || []) as Row[]
+      if (!rows.value.length) {
+        console.warn('[CooperadosView] Nenhum item recebido do backend (oficial). Params:', Object.fromEntries(p))
+      }
       total.value = Number(resp?.total || 0)
       lastLoadedPage.value = page.value
+      appliedDocsORBackend.value = false
+      try { if (localStorage.getItem('debug:cooperados') === '1') console.log('[CooperadosView.load] official', { count: rows.value.length, total: total.value, page: page.value, limit: limit.value, params: Object.fromEntries(p) }) } catch {}
+
+      // Se total>0 e a página solicitada estiver fora do alcance (resposta vazia), volta para a última página válida e recarrega uma vez
+      try {
+        const tp = Math.max(1, Math.ceil(total.value / limit.value))
+        if (total.value > 0 && rows.value.length === 0 && page.value > tp) {
+          console.warn('[CooperadosView] Página fora do alcance no modo oficial. Ajustando para', tp)
+          page.value = tp
+          lastLoadedPage.value = tp
+          pushStateToQuery()
+          await load()
+          return
+        }
+      } catch {}
 
       // Contadores oficiais (mesmos filtros, sem page/limit)
-      const countParams = buildApiParams()
-      countParams.delete('page')
-      countParams.delete('limit')
-      remoteCounts.value = await countCooperadosStatistics(countParams)
+      try {
+        const countParams = buildApiParams({ forStatistics: true })
+        countParams.delete('page')
+        countParams.delete('limit')
+        remoteCounts.value = await countCooperadosStatistics(countParams)
+      } catch {
+        remoteCounts.value = { all: total.value, active: 0, inactive: 0, blocked: 0, pending: 0 }
+      }
+      // Salva cache (considerando página/limit na assinatura para oficial)
+      const signedKey = `${mode}:${makeFullSignature(true)}`
+      listCache.value[signedKey] = {
+        k: signedKey, mode, at: Date.now(), ttl: LIST_CACHE_TTL,
+        rows: rows.value, total: total.value, remoteCounts: remoteCounts.value,
+        page: page.value, limit: limit.value
+      }
+      saveCacheToSession()
     } else {
-      // Fallback: endpoint legacy (sem contadores), sem provocar 400
-      const legacy = new URLSearchParams()
-      legacy.append('page', String(page.value - 1))
-      legacy.append('limit', String(limit.value))
-      if (q.value) legacy.append('q', q.value)
-      const data: any = await listCooperados(legacy)
-      rows.value = Array.isArray(data) ? (data as Row[]) : ((data?.data || data?.rows || []) as Row[])
-      total.value = Array.isArray(data) ? (data as any[]).length : Number(data?.total || rows.value.length)
-  lastLoadedPage.value = page.value
-      const all = rows.value.length
-      const active = rows.value.filter(isAtivo as any).length
-      const inactive = rows.value.filter(isInativo as any).length
-      const blocked = rows.value.filter(isBloqueado as any).length
-      const pending = rows.value.filter(isPendente as any).length
-      remoteCounts.value = { all, active, inactive, blocked, pending }
+      // Modo híbrido: quando o limite UI não é oficial (ex.: 18) e não há filtros só do cliente,
+      // usamos a paginação oficial com limit=100 e fatiamos localmente a página solicitada.
+      // Carrega estatísticas primeiro (alimenta totalPages em casos sem total no backend)
+      try {
+        const countParams = buildApiParams({ forStatistics: true })
+        countParams.delete('page')
+        countParams.delete('limit')
+        remoteCounts.value = await countCooperadosStatistics(countParams)
+      } catch { /* noop */ }
+  const tabPred = getTabPredicate()
+      const hybrid = tabPred ? await fetchHybridOfficialFilteredPage(tabPred) : await fetchHybridOfficialPage()
+      rows.value = hybrid.items
+      total.value = Number(hybrid.total || 0)
+      lastLoadedPage.value = page.value
+      appliedDocsORBackend.value = false
+      officialHybridMode.value = true
+  try { if (localStorage.getItem('debug:cooperados') === '1') console.log('[CooperadosView.load] hybrid-official', { count: rows.value.length, total: total.value, page: page.value, uiLimit: limit.value }) } catch {}
+
+        // Ajuste de página inválida no modo híbrido (quando total muda e a subpágina deixa de existir)
+        try {
+          const tp = Math.max(1, Math.ceil(total.value / Math.max(1, limit.value)))
+          if (total.value > 0 && rows.value.length === 0 && page.value > tp) {
+            console.warn('[CooperadosView] Página fora do alcance no modo híbrido. Ajustando para', tp)
+            page.value = tp
+            lastLoadedPage.value = tp
+            pushStateToQuery()
+            await load()
+            return
+          }
+        } catch {}
+
+      // Se estatísticas falharam acima, tenta uma vez aqui; senão, usa fallback com total do backend
+      if (!remoteCounts.value || Number(remoteCounts.value.all || 0) === 0) {
+        try {
+          const countParams = buildApiParams({ forStatistics: true })
+          countParams.delete('page')
+          countParams.delete('limit')
+          remoteCounts.value = await countCooperadosStatistics(countParams)
+        } catch {
+          remoteCounts.value = { all: total.value, active: 0, inactive: 0, blocked: 0, pending: 0 }
+        }
+      }
+      // Salva cache (assinatura completa com page/limit e aba)
+      listCache.value[cacheKey] = {
+        k: cacheKey, mode, at: Date.now(), ttl: LIST_CACHE_TTL,
+        items: rows.value, total: total.value, remoteCounts: remoteCounts.value,
+        page: page.value, limit: limit.value
+      }
+      saveCacheToSession()
     }
   } catch (err) {
-    console.warn('[cooperados] paginate/documents falhou, fallback para endpoint antigo', err)
+    console.warn('[cooperados] paginate/documents falhou, aplicando fallback', err)
+    try {
+  // Se a intenção era usar filtros locais (documentos ou outros filtros client-only), faz o fallback para paginação local completa
+  if (docFiltersActive.value || hasClientOnlyFilterActive.value) {
+        logDocs('load:catch:fallback-local')
+        loadingMore.value = false
+        aggregating.value = true
+        progressPercent.value = 2
+        progressLabel.value = 'Carregando…'
+        const list = await fetchAllForLocalPaging({
+          signal,
+          expectedTotal: progressTotalHint.value || undefined,
+          onProgress: (pct, info) => {
+            progressPercent.value = Math.max(2, Math.min(99, pct))
+            const received = Number(info?.received || 0)
+            const total = Number(progressTotalHint.value || info?.total || 0)
+            progressLabel.value = total > 0
+              ? `Carregando ${received.toLocaleString('pt-BR')} de ${total.toLocaleString('pt-BR')} (${progressPercent.value}%)…`
+              : `Carregando (${progressPercent.value}%)…`
+          }
+        })
+        rows.value = list
+        total.value = list.length
+  const countParams = buildApiParams({ includeDocFilters: false, forStatistics: true })
+        countParams.delete('page')
+        countParams.delete('limit')
+        remoteCounts.value = await countCooperadosStatistics(countParams)
+        appliedDocsORBackend.value = false
+        loadingMore.value = false
+        aggregating.value = false
+        progressPercent.value = 100
+        progressLabel.value = 'Concluído'
+        return
+      }
+    } catch (e) {
+      console.warn('[cooperados] fallback local falhou, usando legado', e)
+    }
+    // Fallback final: endpoint legado simples
     const legacy = new URLSearchParams()
     legacy.append('page', String(page.value - 1))
     legacy.append('limit', String(limit.value))
@@ -454,6 +946,8 @@ async function load() {
     rows.value = Array.isArray(data) ? (data as Row[]) : ((data?.data || data?.rows || []) as Row[])
     total.value = Array.isArray(data) ? (data as any[]).length : Number(data?.total || rows.value.length)
     remoteCounts.value = { all: total.value, active: 0, inactive: 0, blocked: 0, pending: 0 }
+    appliedDocsORBackend.value = false
+  try { console.log('[CooperadosView.load] legacy', { count: rows.value.length, total: total.value, page: page.value, limit: limit.value, params: Object.fromEntries(legacy) }) } catch {}
   } finally {
     // Se estamos paginando localmente (doc filters ou abas operacionais), garanta que a página atual
     // não ultrapasse o total de páginas calculado, evitando cair para 1 indevidamente.
@@ -464,10 +958,13 @@ async function load() {
         if (page.value > tp) page.value = tp
       }
     } catch {}
-    loading.value = false
+    // Finalização de estados
+    if (loading.value) loading.value = false
+    loadingMore.value = false
+    aggregating.value = false
+    // Atualiza contadores de região com os filtros atuais
+    try { refreshRegionCounts() } catch {}
   }
-
-
 }
 
 function resolveCooperadoId(it: Row): string | number | null {
@@ -485,9 +982,44 @@ async function openDetail(it: Row) {
   // Se o modo for "page", navegar para a página de detalhes
   if (viewMode.value === 'page') {
     try {
+      // Snapshot leve do estado atual para restaurar ao voltar (sem depender da URL)
+      const snapshotTTL = 120000 // 2 minutos
+      const state = {
+        at: Date.now(),
+        ttl: snapshotTTL,
+        q: q.value,
+        sortBy: sortBy.value,
+        page: page.value,
+        limit: limit.value,
+        currentTab: currentTab.value,
+        sexoFilter: sexoFilter.value,
+        estadoFilter: estadoFilter.value,
+        cidadeFilter: cidadeFilter.value,
+        regiaoFilter: regiaoFilter.value,
+        statusFilter: statusFilter.value,
+        opStatusFilter: opStatusFilter.value,
+        useOpStatusTabs: useOpStatusTabs.value,
+        opTab: opTab.value,
+        funcaoFilter: funcaoFilter.value,
+        vencFotoPerfil: vencFotoPerfil.value,
+        vencAtestado: vencAtestado.value,
+        vencAntecedentes: vencAntecedentes.value,
+        vencUniforme: vencUniforme.value,
+        // dataset em memória (cap para evitar sessionStorage grande)
+        rows: (Array.isArray(rows.value) ? rows.value.slice(0, 600) : []),
+        total: total.value,
+        remoteCounts: remoteCounts.value,
+        officialHybridMode: officialHybridMode.value,
+        appliedDocsORBackend: appliedDocsORBackend.value,
+      }
+      sessionStorage.setItem('cooperados:viewState', JSON.stringify(state))
+      // Flag para disparar restauração ao voltar
+      sessionStorage.setItem('cooperados:restore', '1')
       // Destacar imediatamente o card clicado
       lastVisitedId.value = String(safeId)
       sessionStorage.setItem('cooperados:last', JSON.stringify({ id: String(safeId), at: Date.now() }))
+      // Salva o objeto completo para o detalhe usar sem precisar refetch por id
+      sessionStorage.setItem('cooperados:detail', JSON.stringify(it))
     } catch { /* noop */ }
     // Levar a query atual junto para que o botão Voltar preserve busca/filtros
     router.push({ name: 'cooperado-detail', params: { id: String(safeId) }, query: { ...route.query } })
@@ -497,9 +1029,8 @@ async function openDetail(it: Row) {
     selectedCooperadoId.value = Number(safeId) || null
     showDetail.value = true
     detailLoading.value = true
-    detail.value = null
-    const data = await getCooperado(safeId, new URLSearchParams())
-    detail.value = (data && (data.data || data)) as Row
+    // Preenche imediatamente com o item clicado (sem refetch).
+    detail.value = it
     // carregar abas extras (pagamentos/presenças)
     loadDetailExtras(String(safeId))
   } catch (e) {
@@ -543,50 +1074,146 @@ function startEdit() {
 function cancelEdit() {
   editing.value = false
 }
+// Persiste as alterações do formulário de edição e atualiza o detalhe/lista
 async function saveEdit() {
   try {
-    if (!detail.value) return
-    const id = resolveCooperadoId(detail.value)
-    if (id == null) return
-    const payload: any = {
-      nome: detail.value.nome,
-      sexo: detail.value.sexo,
-      cidade: detail.value.cidade,
-      uf: detail.value.uf || detail.value.estado,
-      cooperativa: detail.value.cooperativa,
-      status: detail.value.status,
-      // Adicione outros campos editáveis necessários
+    const id = selectedCooperadoId.value
+    if (!id || !detail.value) {
+      ;(window as any).$toast?.error?.('Nada para salvar')
+      return
     }
-    await updateCooperado(String(id), payload)
+
+    // Monta o payload com os campos editáveis mostrados no formulário
+    const d: any = detail.value
+    const payload: any = {
+      nome: d.nome,
+      cpf: d.cpf,
+      rg: d.rg,
+      dataNasc: d.dataNasc,
+      sexo: d.sexo,
+      cooperativa: d.cooperativa,
+      status: d.status,
+      nomeMae: d.nomeMae,
+      nomePai: d.nomePai,
+      dataExp: d.dataExp,
+      email: d.email,
+      telefone1: d.telefone1,
+      telefone2: d.telefone2,
+  gestor: d.gestor,
+      cidade: d.cidade,
+      uf: d.uf ?? d.estado,
+      estado: d.uf ?? d.estado,
+      bairro: d.bairro,
+      endereco: d.endereco,
+      numero: d.numero,
+      complemento: d.complemento,
+      cep: d.cep,
+  regiao: d.regiao ?? d.regiao_sp ?? d.zona,
+      tipoPagto: d.tipoPagto,
+      banco: d.banco,
+      agencia: d.agencia,
+      conta: d.conta,
+      digConta: d.digConta,
+      observacoes: d.observacoes,
+    }
+
+    const resp = await updateCooperado(id, payload)
+    const serverObj = (resp && (resp.data || resp))
+    // Mescla: prioriza retorno do servidor, mantendo payload como fallback
+    const merged = typeof serverObj === 'object' && serverObj
+      ? { ...detail.value, ...payload, ...serverObj }
+      : { ...detail.value, ...payload }
+
+    detail.value = merged
+    // Atualiza a lista visível em memória
+    try {
+      const idx = rows.value.findIndex((it) => String(resolveCooperadoId(it)) === String(id))
+      if (idx >= 0) {
+        rows.value[idx] = { ...rows.value[idx], ...merged }
+      }
+    } catch {}
+
     editing.value = false
-    ;(window as any).$toast?.success?.('Dados atualizados')
+    ;(window as any).$toast?.success?.('Dados salvos')
   } catch (e) {
-    console.error('[cooperados.detail] salvar edição', e)
+    console.error('[cooperados.saveEdit] falhou', e)
     ;(window as any).$toast?.error?.('Não foi possível salvar as alterações')
   }
 }
 
 // Helpers de status para abas (Situação)
-function normStatus(it: Row) {
-  return String(it.status || it.situacao || '').toLowerCase()
+function normStatusText(v: unknown) {
+  return String(v || '')
+    .normalize('NFD')
+    .replace(/\p{Diacritic}+/gu, '')
+    .toLowerCase()
+    .trim()
 }
-function isAtivo(it: Row) {
-  const s = normStatus(it)
-  if (!s) return false
-  if (s.includes('bloq') || s.includes('pend') || s.includes('inativ')) return false
-  return s.includes('ativ') || s.includes('aprov')
+// Normaliza texto (acentos, caixa)
+function normalizeText(s: unknown){
+  return String(s||'')
+    .normalize('NFD')
+    .replace(/\p{Diacritic}+/gu, '')
+    .toLowerCase()
+    .trim()
 }
-function isInativo(it: Row) {
-  const s = normStatus(it)
-  return s.includes('inativ')
+function getStatusCode(it: Row): number | null {
+  // Procura código em múltiplos campos
+  const candidates = [
+    (it as any)?.status,
+    (it as any)?.statusCadastro,
+    (it as any)?.status_geral,
+    (it as any)?.statusGeral,
+  ]
+  for (const raw of candidates) {
+    const n = Number(raw)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return null
 }
-function isBloqueado(it: Row) {
-  const s = normStatus(it)
-  return s.includes('bloq')
+function getStatusLabel(it: Row): 'ativo' | 'inativo' | 'bloqueado' | 'pendente' | null {
+  const code = getStatusCode(it)
+  if (code != null) {
+    if (code === 1) return 'ativo'
+    if (code === 2) return 'inativo'
+    if (code === 3) return 'bloqueado'
+    if (code === 4) return 'pendente'
+  }
+  const txt = normStatusText((it as any)?.situacao || (it as any)?.status || (it as any)?.statusCadastroDesc)
+  if (!txt) return null
+  // Usa regex para evitar colisão (ex.: "inativo" conter "ativo")
+  if (/(^|\b)(bloquead[oa]|bloq)(\b|$)/.test(txt)) return 'bloqueado'
+  if (/(^|\b)(pend|pendente|aguardando|incompleto)(\b|$)/.test(txt)) return 'pendente'
+  if (/(^|\b)(inativ[oa]|desativad[oa])(\b|$)/.test(txt)) return 'inativo'
+  if (/(^|\b)(ativ[oa]|aprovad[oa])(\b|$)/.test(txt)) return 'ativo'
+  return null
 }
-function isPendente(it: Row) {
-  const s = normStatus(it)
-  return s.includes('pend')
+function isAtivo(it: Row) { return getStatusLabel(it) === 'ativo' }
+function isInativo(it: Row) { return getStatusLabel(it) === 'inativo' }
+function isBloqueado(it: Row) { return getStatusLabel(it) === 'bloqueado' }
+function isPendente(it: Row) { return getStatusLabel(it) === 'pendente' }
+
+// Deriva a chave de Status Operacional a partir de múltiplos campos possíveis, usando o normalizador centralizado
+function getOpStatusKey(it: Row): ReturnType<typeof normalizeOpStatusKey> {
+  const cand = [
+    (it as any)?.opStatusKey,
+    (it as any)?.op_status_key,
+    (it as any)?.operationalStatus,
+    (it as any)?.operational_status,
+    (it as any)?.statusOperacional,
+    (it as any)?.status_operacional,
+    (it as any)?.statusOp,
+    (it as any)?.status_op,
+    (it as any)?.situacao_operacional,
+    (it as any)?.situacaoOp,
+    (it as any)?.situacao_op,
+    (it as any)?.situacao,
+  ]
+  for (const v of cand) {
+    const k = normalizeOpStatusKey(v)
+    if (k) return k
+  }
+  return ''
 }
 
 // Aplica todos os filtros (exceto a aba)
@@ -637,7 +1264,8 @@ const baseFilteredRows = computed<Row[]>(() => {
   }
 
   // Filtro de documentos vencidos (OR entre os selecionados)
-  if (vencFotoPerfil.value || vencAtestado.value || vencAntecedentes.value || vencUniforme.value) {
+  // Só aplicamos no cliente se NÃO tivermos aplicado via backend
+  if (!appliedDocsORBackend.value && (vencFotoPerfil.value || vencAtestado.value || vencAntecedentes.value || vencUniforme.value)) {
     list = list.filter(it => {
       const f = getDocVencFlags(it)
       return (
@@ -845,24 +1473,31 @@ const funcaoCounts = computed<Record<string, number>>(() => {
       counts[key] = (counts[key] || 0) + 1
     }
   }
-  // ordenar por maior frequência e pegar top 5
-  const top = Object.entries(counts).sort((a,b) => b[1]-a[1]).slice(0,5)
+  // Construir top priorizando marcadores especiais e completando com os mais frequentes
+  const entries = Object.entries(counts).sort((a,b) => b[1]-a[1])
   const topObj: Record<string, number> = {}
-  for (const [k,v] of top) topObj[k as string] = v as number
+  // Garante presença dos especiais primeiro
+  for (const special of [FILTRO_COM_FUNCAO, FILTRO_SEM_FUNCAO]) {
+    if (counts[special] !== undefined) topObj[special] = counts[special]
+  }
+  for (const [k,v] of entries) {
+    if (k === FILTRO_COM_FUNCAO || k === FILTRO_SEM_FUNCAO) continue
+    if (Object.keys(topObj).length >= 5) break
+    topObj[k] = v
+  }
   return topObj
 })
 
 const totalPreFuncao = computed(() => Array.isArray(preFuncaoRows?.value) ? preFuncaoRows.value.length : 0)
 
 
+// Contadores locais de região (fallback)
 const regiaoCounts = computed<Record<string, number>>(() => {
   const counts: Record<string, number> = {}
   const list = preRegiaoRows.value
   const isSP = String(estadoFilter.value).toUpperCase() === 'SP'
   if (isSP) {
-    const labels = ['Zona Norte', 'Zona Sul', 'Zona Leste', 'Zona Oeste', 'Centro']
-    for (const label of labels) {
-
+    for (const label of SP_REGION_LABELS) {
       const v = normalizeText(label)
       counts[label] = list.filter(it => normalizeText(it.regiao || it.regiao_sp || it.zona || it.zona_sp || '').includes(v)).length
     }
@@ -882,6 +1517,65 @@ const regiaoCounts = computed<Record<string, number>>(() => {
 
 const totalPreRegiao = computed(() => Array.isArray(preRegiaoRows?.value) ? preRegiaoRows.value.length : 0)
 
+// Contadores remotos (estatísticas) por região
+const remoteRegionCounts = ref<Record<string, number>>({})
+const remoteRegionAll = ref<number>(0)
+const remoteRegionKeys = computed<string[]>(() => Object.keys(remoteRegionCounts.value || {}))
+
+// Exposição unificada para a UI: usa remotos se disponíveis; caso contrário, fallback local
+const uiRegiaoCounts = computed<Record<string, number>>(() => {
+  const rc = remoteRegionCounts.value || {}
+  return Object.keys(rc).length > 0 ? rc : regiaoCounts.value
+})
+const uiRegiaoAll = computed<number>(() => {
+  return Number(remoteRegionAll.value || 0) > 0 ? Number(remoteRegionAll.value || 0) : totalPreRegiao.value
+})
+
+let _regionTimer: any = null
+function toApiRegiao(label: string): string {
+  const t = normalizeText(label).toUpperCase()
+  if (t.includes('ZONA') && t.includes('NORTE')) return 'ZONA NORTE'
+  if (t.includes('ZONA') && t.includes('OESTE')) return 'ZONA OESTE'
+  if (t.includes('ZONA') && t.includes('SUL')) return 'ZONA SUL'
+  if (t.includes('ZONA') && t.includes('LESTE')) return 'ZONA LESTE'
+  if (t.includes('GRANDE') && t.includes('ABC')) return 'GRANDE ABC'
+  if (t.includes('CAMPINAS')) return 'CAMPINAS'
+  if (t.includes('VALE')) return 'VALE'
+  if (t.includes('BAIXADA')) return 'BAIXADA'
+  return label.toUpperCase()
+}
+async function refreshRegionCounts() {
+  try { if (_regionTimer) { clearTimeout(_regionTimer); _regionTimer = null } } catch {}
+  _regionTimer = setTimeout(async () => {
+    _regionTimer = null
+    try {
+      // Base com filtros atuais (sexo, uf, cidade, docs, função, etc.) – o endpoint retorna um objeto "regioes"
+      const base = buildApiParams({ forStatistics: true })
+      base.delete('page'); base.delete('limit')
+      const stats = await countCooperadosStatistics(base)
+      remoteRegionAll.value = Number(stats?.all || 0) || 0
+      const incoming = (stats?.regioes || stats?.regions || {}) as Record<string, number>
+      const upper: Record<string, number> = {}
+      for (const [k,v] of Object.entries(incoming)) upper[String(k).toUpperCase()] = Number(v||0)
+      const isSP = String(estadoFilter.value || '').toUpperCase() === 'SP'
+      const map: Record<string, number> = {}
+      if (isSP) {
+        for (const label of SP_REGION_LABELS) {
+          const key = toApiRegiao(label) // 'ZONA NORTE', etc.
+          map[label] = Number(upper[key] || 0)
+        }
+      } else {
+        for (const k of ['N','NE','CO','SE','S']) map[k] = Number(upper[k] || 0)
+      }
+      remoteRegionCounts.value = map
+    } catch (e) {
+      // Em falha, zera remotos para ativar fallback local
+      remoteRegionCounts.value = {}
+      // mantém remoteRegionAll como estava ou 0
+    }
+  }, 120)
+}
+
 
 function getRegiaoCount(key: string) {
   try {
@@ -899,49 +1593,61 @@ const totalSexoF = computed(() => preSexoRows.value.filter((it: Row) => String(i
 
 
 
-// Totais dos tabs devem refletir os filtros atuais aplicados na UI.
-// Para garantir atualização imediata com qualquer filtro local (UF, cidade, região, função, etc.),
-// sempre computamos a partir de baseFilteredRows.
-const totalTodos = computed(() => baseFilteredRows.value.length)
-const totalAtivos = computed(() => baseFilteredRows.value.filter(isAtivo).length)
-const totalInativos = computed(() => baseFilteredRows.value.filter(isInativo).length)
-const totalBloqueados = computed(() => baseFilteredRows.value.filter(isBloqueado).length)
-const totalPendentesTab = computed(() => baseFilteredRows.value.filter(isPendente).length)
+// Totais das abas (Situação):
+// - Em paginação oficial/híbrida, usamos contadores do backend (remoteCounts) para refletir o total global.
+// - Em paginação local, calculamos a partir do que está filtrado em memória (baseFilteredRows).
+const totalTodos = computed(() => {
+  // Quando filtros de documentos estão ativos, os totais devem refletir o dataset filtrado localmente
+  if (docFiltersActive.value) return baseFilteredRows.value.length
+  const all = Number(remoteCounts.value.all || 0)
+  if (all > 0) return all
+  if (isOfficialPaged.value) return Number(total.value || 0)
+  return baseFilteredRows.value.length
+})
+const totalAtivos = computed(() => {
+  if (docFiltersActive.value) return baseFilteredRows.value.filter(isAtivo as any).length
+  const n = Number(remoteCounts.value.active || 0)
+  if (n > 0) return n
+  if (isOfficialPaged.value) return Number(remoteCounts.value.active || 0)
+  return baseFilteredRows.value.filter(isAtivo as any).length
+})
+const totalInativos = computed(() => {
+  if (docFiltersActive.value) return baseFilteredRows.value.filter(isInativo as any).length
+  const n = Number(remoteCounts.value.inactive || 0)
+  if (n > 0) return n
+  if (isOfficialPaged.value) return Number(remoteCounts.value.inactive || 0)
+  return baseFilteredRows.value.filter(isInativo as any).length
+})
+const totalBloqueados = computed(() => {
+  if (docFiltersActive.value) return baseFilteredRows.value.filter(isBloqueado as any).length
+  const n = Number(remoteCounts.value.blocked || 0)
+  if (n > 0) return n
+  if (isOfficialPaged.value) return Number(remoteCounts.value.blocked || 0)
+  return baseFilteredRows.value.filter(isBloqueado as any).length
+})
+const totalPendentesTab = computed(() => {
+  if (docFiltersActive.value) return baseFilteredRows.value.filter(isPendente as any).length
+  const n = Number(remoteCounts.value.pending || 0)
+  if (n > 0) return n
+  if (isOfficialPaged.value) return Number(remoteCounts.value.pending || 0)
+  return baseFilteredRows.value.filter(isPendente as any).length
+})
 
 
 const filteredRows = computed<Row[]>(() => {
   let list: Row[] = baseFilteredRows.value
 
-  // Aba (Situação)
-  if (!useOpStatusTabs.value) {
+  // Aba (Situação): em paginação local aplicamos no cliente; em oficial/híbrida confiamos no backend
+  if (!useOpStatusTabs.value && !isOfficialPaged.value) {
     if (currentTab.value === 'ativos') list = list.filter(isAtivo as any)
     else if (currentTab.value === 'inativos') list = list.filter(isInativo as any)
     else if (currentTab.value === 'bloqueados') list = list.filter(isBloqueado as any)
     else if (currentTab.value === 'pendentes') list = list.filter(isPendente as any)
   }
 
-  // Ordenação
-  const byName = (it: Row) => normalizeText(it.nome || it.name || '')
-  if (sortBy.value === 'nome') list = [...list].sort((a, b) => byName(a).localeCompare(byName(b)))
-  else if (sortBy.value === 'codigo') list = [...list].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0))
-  else list = [...list].sort((a, b) => (Number(b.id) || 0) - (Number(a.id) || 0))
+  // Nota: atualização de contadores de região é feita por refreshRegionCounts() fora deste computed
   return list
 })
-
-function normalizeText(s: unknown) {
-  return String(s || '')
-    .normalize('NFD')
-    .replace(/\p{Diacritic}+/gu, '')
-    .toLowerCase()
-}
-
-
-function getOpStatusKey(it: Row): string {
-  const raw = (it as any).status_operacional || (it as any).operational_status || (it as any).status_evento || (it as any).status_evento_atual || ''
-  return normalizeOpStatusKey(raw) || ''
-}
-
-
 function getAvatarUrl(it: Row) {
   // tenta campos comuns de foto (prioriza urlImg1)
   return it.urlImg1 || it.foto || it.photo || it.avatar || it.picture || ''
@@ -957,14 +1663,140 @@ function getMatricula(it: Row): string {
   return String(it.matricula || it.matricola || it.registration || '').trim()
 }
 
+// Busca uma subpágina usando paginação oficial (limit=100) e fatia localmente para o limite da UI
+async function fetchHybridOfficialPage(): Promise<{ items: Row[]; total: number }>{
+  const uiLimit = Number(limit.value) || 18
+  const backendLimit = 100
+  // página remota e deslocamento para cobrir a página local atual
+  const startIndex = (Math.max(1, Number(page.value)) - 1) * uiLimit
+  const remotePage = Math.floor(startIndex / backendLimit) // 0-based
+  const p = buildApiParams()
+  p.set('limit', String(backendLimit))
+  p.set('page', String(remotePage))
+  const resp = await paginateCooperadosDocuments(p)
+  const totalAll = Number(resp?.total || 0)
+  const batchA = Array.isArray(resp?.data) ? (resp.data as Row[]) : []
+  const offsetWithinBatch = startIndex - (remotePage * backendLimit)
+  // Se a subpágina local atravessa o fim do batchA, buscarmos o próximo batch e concatenamos
+  let combined: Row[] = batchA
+  if (offsetWithinBatch + uiLimit > backendLimit) {
+    const p2 = buildApiParams()
+    p2.set('limit', String(backendLimit))
+    p2.set('page', String(remotePage + 1))
+    try {
+      const resp2 = await paginateCooperadosDocuments(p2)
+      const batchB = Array.isArray(resp2?.data) ? (resp2.data as Row[]) : []
+      combined = [...batchA, ...batchB]
+    } catch {}
+  }
+  const slice = combined.slice(offsetWithinBatch, offsetWithinBatch + uiLimit)
+  return { items: slice, total: totalAll }
+}
+
+// Obtém um predicado de filtragem correspondente à aba de Situação atual
+function getTabPredicate(): ((r: Row) => boolean) | null {
+  if (useOpStatusTabs.value) return null
+  if (currentTab.value === 'ativos') return (isAtivo as any)
+  if (currentTab.value === 'inativos') return (isInativo as any)
+  if (currentTab.value === 'bloqueados') return (isBloqueado as any)
+  if (currentTab.value === 'pendentes') return (isPendente as any)
+  return null
+}
+
+// Busca híbrida filtrando por aba no cliente e avançando por lotes até preencher a página da UI
+async function fetchHybridOfficialFilteredPage(predicate: (r: Row) => boolean): Promise<{ items: Row[]; total: number }>{
+  const uiLimit = Number(limit.value) || 18
+  const backendLimit = 100
+  const desiredOffset = Math.max(0, (Math.max(1, Number(page.value)) - 1) * uiLimit)
+  let totalAll = 0
+  let skipped = 0
+  let collected: Row[] = []
+  for (let remotePage = 0; collected.length < uiLimit; remotePage++) {
+    const p = buildApiParams()
+    p.set('limit', String(backendLimit))
+    p.set('page', String(remotePage))
+    const resp = await paginateCooperadosDocuments(p)
+    if (remotePage === 0) totalAll = Number(resp?.total || 0)
+    const data = Array.isArray(resp?.data) ? (resp.data as Row[]) : []
+    if (data.length === 0) break
+    const filtered = data.filter(predicate)
+    if (skipped < desiredOffset) {
+      const toSkip = Math.min(filtered.length, desiredOffset - skipped)
+      skipped += toSkip
+      collected.push(...filtered.slice(toSkip))
+    } else {
+      collected.push(...filtered)
+    }
+    if (data.length < backendLimit) break
+  }
+  return { items: collected.slice(0, uiLimit), total: totalAll }
+}
+
 function setLimit(v: unknown) {
-  const allowed = [18, 36, 54, 72, 90]
-  const num = Number(v) || 18
-  const n = allowed.includes(num) ? num : 18
+          const num = Number(v)
+          const isValid = Number.isFinite(num) && num > 0
+          const n = isValid ? num : 18
   limit.value = n
   page.value = 1
   pushStateToQuery()
   load()
+}
+
+// Navegação de página com logs para depuração
+function _dbgBase() {
+  try {
+    return {
+      page: page.value,
+      limit: limit.value,
+      isOfficialPaged: isOfficialPaged.value,
+      officialHybridMode: officialHybridMode.value,
+      hasKnownTotal: hasKnownTotal.value,
+      totalPages: totalPages.value,
+      displayTotal: displayTotal.value,
+      currentTab: currentTab.value,
+    }
+  } catch { return {} as any }
+}
+function goFirst() {
+  if (syncing.value) return
+  const prev = page.value
+  page.value = 1
+  try { if (localStorage.getItem('debug:cooperados') === '1') console.log('[CooperadosView.nav] « first', { from: prev, ..._dbgBase() }) } catch {}
+  pushStateToQuery()
+  if (isOfficialPaged.value) scheduleLoad(0)
+}
+function goPrev() {
+  if (syncing.value) return
+  const prev = page.value
+  page.value = Math.max(1, page.value - 1)
+  try { if (localStorage.getItem('debug:cooperados') === '1') console.log('[CooperadosView.nav] ‹ prev', { from: prev, ..._dbgBase() }) } catch {}
+  pushStateToQuery()
+  if (isOfficialPaged.value) scheduleLoad(0)
+}
+function goTo(p: number) {
+  if (syncing.value) return
+  const prev = page.value
+  page.value = Math.max(1, Number(p) || 1)
+  try { if (localStorage.getItem('debug:cooperados') === '1') console.log('[CooperadosView.nav] · goTo', { to: p, from: prev, ..._dbgBase() }) } catch {}
+  pushStateToQuery()
+  if (isOfficialPaged.value) scheduleLoad(0)
+}
+function goNext() {
+  if (syncing.value) return
+  const prev = page.value
+  const next = hasKnownTotal.value ? Math.min(totalPages.value, page.value + 1) : (page.value + 1)
+  page.value = next
+  try { if (localStorage.getItem('debug:cooperados') === '1') console.log('[CooperadosView.nav] › next', { from: prev, ..._dbgBase() }) } catch {}
+  pushStateToQuery()
+  if (isOfficialPaged.value) scheduleLoad(0)
+}
+function goLast() {
+  if (syncing.value) return
+  const prev = page.value
+  page.value = totalPages.value
+  try { if (localStorage.getItem('debug:cooperados') === '1') console.log('[CooperadosView.nav] » last', { from: prev, ..._dbgBase() }) } catch {}
+  pushStateToQuery()
+  if (isOfficialPaged.value) scheduleLoad(0)
 }
 
 function toWhatsUrl(number: unknown) {
@@ -1128,25 +1960,76 @@ const detailDocumentosList = computed<DocItem[]>(() => {
 // Quando usamos paginação oficial (sem doc filters), já vem paginado do backend.
 // Caso contrário (doc filters OR ou legacy), paginamos localmente.
 const officialAllowed = [1, 10, 20, 50, 100]
-const isOfficialPaged = computed(() => officialAllowed.includes(Number(limit.value)) && !docFiltersActive.value && !useOpStatusTabs.value)
+const isOfficialPaged = computed(() => {
+  const noLocal = !docFiltersActive.value && !useOpStatusTabs.value && !hasClientOnlyFilterActive.value
+  return noLocal && (officialAllowed.includes(Number(limit.value)) || officialHybridMode.value)
+})
+const displayTotal = computed<number>(() => {
+  if (isOfficialPaged.value) {
+    // Para abas, usar o total específico se disponível; senão, cair para o total do backend
+    const tab = String(currentTab.value || 'todos')
+    // Primeiro tenta estatísticas do backend (respeitam sexo/região quando enviados)
+    const preferCounts: Record<string, number> = {
+      ativos: Number(remoteCounts.value.active || 0),
+      inativos: Number(remoteCounts.value.inactive || 0),
+      bloqueados: Number(remoteCounts.value.blocked || 0),
+      pendentes: Number(remoteCounts.value.pending || 0),
+      todos: Number(remoteCounts.value.all || 0),
+    }
+    const fromCounts = preferCounts[tab]
+    if (fromCounts && fromCounts > 0) return fromCounts
+    // Se estatísticas não ajudaram, evitar usar total.value quando ele aparenta ser apenas o tamanho da página exibida
+    // (ex.: 18), o que ocorre quando o backend não informa total. Nestes casos retornamos 0 (total desconhecido)
+    const backendTotal = Number(total.value || 0)
+    const pageSize = Array.isArray(filteredRows.value) ? filteredRows.value.length : 0
+    if (backendTotal > 0 && backendTotal !== pageSize) return backendTotal
+    return 0
+  }
+  // Em paginação local, usamos o total realmente filtrado em memória
+  return Number(filteredRows.value.length || 0)
+})
 const visibleRows = computed<Row[]>(() => {
+  // Em paginação oficial/híbrida, já recebemos a página correta do backend
   if (isOfficialPaged.value) return filteredRows.value
+  // Em paginação local (inclui abas), fatiamos conforme página/limite da UI
   const start = (page.value - 1) * limit.value
   return filteredRows.value.slice(start, start + limit.value)
 })
 
 // Paginação: total de páginas e lista de páginas com elipses
 const totalPages = computed<number>(() => {
-  const totalForPaging = (!isOfficialPaged.value)
-    ? filteredRows.value.length
-    : total.value
-  return Math.max(1, Math.ceil(totalForPaging / limit.value))
+  const totalForPaging = Number(displayTotal.value || 0)
+  return Math.max(1, Math.ceil(Math.max(0, totalForPaging) / Math.max(1, Number(limit.value || 1))))
+})
+
+// Quando estamos em paginação oficial/híbrida e o backend não informa total (ou estatísticas vieram 0),
+// permitimos navegação "às cegas": mostramos uma janela móvel de páginas ao redor da atual.
+const hasKnownTotal = computed<boolean>(() => {
+  return isOfficialPaged.value && Number(displayTotal.value || 0) > 0
+})
+
+const headerRangeStart = computed<number>(() => {
+  const totalForPaging = Number(displayTotal.value || 0)
+  if (!totalForPaging) return 0
+  return Math.min(((page.value - 1) * limit.value) + 1, totalForPaging)
+})
+const headerRangeEnd = computed<number>(() => {
+  const totalForPaging = Number(displayTotal.value || 0)
+  return Math.min(page.value * limit.value, totalForPaging)
 })
 
 const pageItems = computed<Array<number | '…'>>(() => {
   const total = totalPages.value
   const current = page.value
   const delta = 2 // quantidade de páginas vizinhas de cada lado
+  // Caso especial: total desconhecido em modo oficial/híbrido → janela móvel
+  if (isOfficialPaged.value && !hasKnownTotal.value) {
+    const items: Array<number | '…'> = []
+    const start = Math.max(1, current - delta)
+    const end = current + delta
+    for (let p = start; p <= end; p++) items.push(p)
+    return items
+  }
   if (total <= 1) return [1]
   const items: Array<number | '…'> = []
   items.push(1)
@@ -1176,6 +2059,36 @@ function clearOpStatus() { opStatusFilter.value = ''; page.value = 1; pushStateT
 
 function clearSearch() { q.value = ''; page.value = 1; pushStateToQuery(); load() }
 
+function clearAllFilters() {
+  q.value = ''
+  sortBy.value = 'mais_recentes'
+  currentTab.value = 'todos'
+  sexoFilter.value = ''
+  estadoFilter.value = ''
+  cidadeFilter.value = ''
+  regiaoFilter.value = ''
+  statusFilter.value = 'nenhum'
+  opStatusFilter.value = ''
+  useOpStatusTabs.value = false
+  opTab.value = ''
+  funcaoFilter.value = ''
+  vencFotoPerfil.value = false
+  vencAtestado.value = false
+  vencAntecedentes.value = false
+  vencUniforme.value = false
+  page.value = 1
+  // limpar cache para evitar assinaturas antigas com dados muito grandes
+  listCache.value = {}
+  saveCacheToSession()
+  pushStateToQuery()
+  load()
+}
+
+// Recarrega contadores de região quando filtros que impactam estatísticas mudarem
+watch([q, sexoFilter, estadoFilter, cidadeFilter, statusFilter, opStatusFilter, funcaoFilter, vencFotoPerfil, vencAtestado, vencAntecedentes, vencUniforme], () => {
+  try { refreshRegionCounts() } catch {}
+})
+
 function onCreate() {
   // TODO: abrir modal/criar novo cooperado
   console.log('[cooperados.create]')
@@ -1198,8 +2111,13 @@ function printWindow(){ (window as any).print() }
 
 // Inicialização com restauração de estado via query e destaque do último visitado
 onMounted(async () => {
+  loadCacheFromSession()
   syncFromQuery()
-  await load()
+  // Se vier do detalhe com pedido explícito de restauração, tenta restaurar do sessionStorage
+  const restored = restoreListStateIfRequested()
+  if (!restored) {
+    await load()
+  }
   initializing.value = false
   restoreLastVisited()
 })
@@ -1208,42 +2126,170 @@ onMounted(async () => {
 onActivated(async () => {
   // Re-sincroniza com a query atual (mantendo página corrente)
   syncFromQuery()
-  // Recarrega somente se necessário (ex.: se nada carregado ainda)
-  if (!rows.value?.length) {
+  // Tenta restaurar estado salvo ao sair para o detalhe (sem depender da URL)
+  const restored = restoreListStateIfRequested()
+  // Se nada foi restaurado e não há dados carregados, faça um load
+  if (!restored && !rows.value?.length) {
     await load()
   }
-  // Força rearmar a animação de destaque ao retornar
+  // Reaplica destaque do último visitado
   lastVisitedId.value = null
   restoreLastVisited()
-  // Se for paginação oficial e a página atual não foi a última carregada, recarregue
-  if (isOfficialPaged.value && lastLoadedPage.value !== page.value) {
+  // Em paginação oficial/híbrida, se a página atual divergir da última carregada, recarrega para alinhar
+  if (!restored && isOfficialPaged.value && lastLoadedPage.value !== page.value) {
     await load()
   }
 })
 
 function pushStateToQuery() {
-  if (initializing.value) return
-  const qy = buildQueryFromState()
-  // Substitui a query inteira para evitar parâmetros órfãos quando filtros são removidos
-  router.replace({ query: { ...qy } }).catch(() => {})
+  // URL desativada: não escreve estado na querystring
+  return
+}
+
+// Restauração leve do estado ao voltar do detalhe
+function restoreListStateIfRequested(): boolean {
+  try {
+    // Evita que watchers reajam durante a restauração
+    syncing.value = true
+    const shouldRestore = sessionStorage.getItem('cooperados:restore') === '1'
+    const raw = sessionStorage.getItem('cooperados:viewState')
+    if (!shouldRestore || !raw) return false
+    const state = JSON.parse(raw || '{}') as any
+    const at = Number(state?.at || 0)
+    const ttl = Number(state?.ttl || 0)
+    if (!at || !ttl || (Date.now() - at > ttl)) {
+      sessionStorage.removeItem('cooperados:restore')
+      return false
+    }
+    // Atribui filtros/estado
+    q.value = state.q || ''
+    sortBy.value = state.sortBy || 'mais_recentes'
+    page.value = Number(state.page || 1)
+    limit.value = Number(state.limit || 18)
+    currentTab.value = state.currentTab || 'todos'
+    sexoFilter.value = state.sexoFilter || ''
+    estadoFilter.value = state.estadoFilter || ''
+    cidadeFilter.value = state.cidadeFilter || ''
+    regiaoFilter.value = state.regiaoFilter || ''
+    statusFilter.value = state.statusFilter || 'nenhum'
+    opStatusFilter.value = state.opStatusFilter || ''
+    useOpStatusTabs.value = !!state.useOpStatusTabs
+    opTab.value = state.opTab || ''
+    funcaoFilter.value = state.funcaoFilter || ''
+    vencFotoPerfil.value = !!state.vencFotoPerfil
+    vencAtestado.value = !!state.vencAtestado
+    vencAntecedentes.value = !!state.vencAntecedentes
+    vencUniforme.value = !!state.vencUniforme
+    // Dataset
+    rows.value = Array.isArray(state.rows) ? state.rows : []
+    total.value = Number(state.total || 0)
+    try { remoteCounts.value = state.remoteCounts || remoteCounts.value } catch {}
+    try { officialHybridMode.value = !!state.officialHybridMode } catch {}
+    try { appliedDocsORBackend.value = !!state.appliedDocsORBackend } catch {}
+    // Limpa a flag para não restaurar em loops posteriores
+    sessionStorage.removeItem('cooperados:restore')
+    // Se restauramos alguma coisa, evitamos um refetch imediato
+    return true
+  } catch {
+    return false
+  } finally {
+    // Libera watchers após a restauração
+    syncing.value = false
+  }
 }
 
 // Recarrega e sincroniza ao mudar de aba (situação)
-watch(currentTab, () => { if (initializing.value || syncing.value) return; page.value = 1; pushStateToQuery(); load() })
+watch(currentTab, () => {
+  if (initializing.value || syncing.value) return
+  page.value = 1
+  pushStateToQuery()
+  // Em paginação local, apenas re-filtra em memória; evita refetch
+  if (!isOfficialPaged.value) return
+  scheduleLoad()
+})
 // Recarrega e sincroniza ao mudar sexo
-watch(sexoFilter, () => { if (initializing.value || syncing.value) return; page.value = 1; pushStateToQuery(); load() })
+watch(sexoFilter, () => {
+  if (initializing.value || syncing.value) return
+  page.value = 1
+  pushStateToQuery()
+  if (!isOfficialPaged.value) return
+  scheduleLoad()
+})
 // Recarrega e sincroniza ao mudar ordenação
-watch(sortBy, () => { if (initializing.value || syncing.value) return; page.value = 1; pushStateToQuery(); load() })
+watch(sortBy, () => {
+  if (initializing.value || syncing.value) return
+  page.value = 1
+  pushStateToQuery()
+  if (!isOfficialPaged.value) return
+  scheduleLoad()
+})
 // Recarrega e sincroniza ao alterar filtros de vencimento
-watch([vencFotoPerfil, vencAtestado, vencAntecedentes, vencUniforme], () => { if (initializing.value || syncing.value) return; page.value = 1; pushStateToQuery(); load() }, { deep: true })
+watch([vencFotoPerfil, vencAtestado, vencAntecedentes, vencUniforme], () => { if (initializing.value || syncing.value) return; page.value = 1; pushStateToQuery(); scheduleLoad() }, { deep: true })
 // Sincroniza filtros adicionais
-watch(statusFilter, () => { if (initializing.value || syncing.value) return; page.value = 1; pushStateToQuery(); load() })
-watch(opStatusFilter, () => { if (initializing.value || syncing.value) return; page.value = 1; pushStateToQuery(); load() })
-watch(useOpStatusTabs, (val) => { if (initializing.value || syncing.value) return; page.value = 1; if (val) { opStatusFilter.value = '' } else { opTab.value = '' } pushStateToQuery(); load() })
-watch(opTab, () => { if (initializing.value || syncing.value) return; page.value = 1; pushStateToQuery(); load() })
-watch(funcaoFilter, () => { if (initializing.value || syncing.value) return; page.value = 1; pushStateToQuery(); load() })
-watch(page, () => { if (initializing.value || syncing.value) return; pushStateToQuery() })
-watch(limit, () => { if (initializing.value || syncing.value) return; pushStateToQuery() })
+watch(statusFilter, () => {
+  if (initializing.value || syncing.value) return
+  page.value = 1
+  pushStateToQuery()
+  if (!isOfficialPaged.value) return
+  scheduleLoad()
+})
+watch(opStatusFilter, () => {
+  if (initializing.value || syncing.value) return
+  page.value = 1
+  pushStateToQuery()
+  if (!isOfficialPaged.value) return
+  scheduleLoad()
+})
+watch(useOpStatusTabs, (val) => {
+  if (initializing.value || syncing.value) return
+  page.value = 1
+  if (val) { opStatusFilter.value = '' } else { opTab.value = '' }
+  pushStateToQuery()
+  // Ao alternar o modo de abas operacionais, garantimos um dataset completo.
+  // O cache torna essa operação instantânea quando já carregado.
+  scheduleLoad()
+})
+watch(opTab, () => {
+  if (initializing.value || syncing.value) return
+  page.value = 1
+  pushStateToQuery()
+  if (!isOfficialPaged.value) return
+  scheduleLoad()
+})
+watch(funcaoFilter, () => {
+  if (initializing.value || syncing.value) return
+  page.value = 1
+  pushStateToQuery()
+  if (!isOfficialPaged.value) return
+  scheduleLoad()
+})
+
+// Garante que a página atual esteja dentro do intervalo após mudanças no filtro (modo local, todas as abas)
+watch(filteredRows, () => {
+  try {
+    if (initializing.value) return
+    // Não clampa enquanto está carregando, para não interferir na navegação oficial/híbrida
+    if (loading.value) return
+    if (!isOfficialPaged.value) {
+      const totalForPaging = filteredRows.value.length
+      const tp = Math.max(1, Math.ceil(Math.max(0, totalForPaging) / Math.max(1, limit.value)))
+      if (page.value > tp) page.value = tp
+      if (page.value < 1) page.value = 1
+    }
+  } catch {}
+})
+watch(page, () => {
+  if (initializing.value || syncing.value) return
+  try { if (localStorage.getItem('debug:cooperados') === '1') console.log('[CooperadosView.watch] page ->', page.value, { isOfficialPaged: isOfficialPaged.value, totalPages: totalPages.value, hasKnownTotal: hasKnownTotal.value }) } catch {}
+  pushStateToQuery()
+  if (isOfficialPaged.value) scheduleLoad(0)
+})
+watch(limit, () => {
+  if (initializing.value || syncing.value) return
+  try { if (localStorage.getItem('debug:cooperados') === '1') console.log('[CooperadosView.watch] limit ->', limit.value, { isOfficialPaged: isOfficialPaged.value }) } catch {}
+  pushStateToQuery()
+  if (isOfficialPaged.value) scheduleLoad(0)
+})
 // Recarrega ao buscar por q ao pressionar Enter (já chama filter()); para mudança geral, debounce seria melhor
 
 </script>
@@ -1257,11 +2303,23 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
         <h1 class="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">Cooperados</h1>
         <span
           class="bg-blue-100 mt-1 text-blue-800 text-xs font-medium me-2 px-2.5 py-0.5 rounded-sm dark:bg-blue-900 dark:text-blue-300">
-          Exibindo {{ Math.min((page - 1) * limit + 1, isOfficialPaged ? total : filteredRows.length) }} • {{ Math.min(page * limit,
-            (isOfficialPaged ? total : filteredRows.length)) }} de {{ isOfficialPaged ? total : filteredRows.length }} registros</span>
+          Exibindo {{ headerRangeStart }} • {{ headerRangeEnd }} de {{ displayTotal }} registros</span>
       </div>
-      <ClientActions @print="printWindow" @create="onCreate" @action="onMoreAction" />
+      <div class="flex items-center gap-2">
+        <button @click="clearCooperadosCacheAndReload" class="px-2 py-1.5 rounded border border-zinc-300 text-xs hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800" title="Limpar cache e recarregar">
+          Recarregar dados
+        </button>
+        <ClientActions @print="printWindow" @create="onCreate" @action="onMoreAction" />
+      </div>
     </header>
+
+    <!-- Barra de progresso leve (não bloqueia) -->
+    <div v-if="aggregating" class="mb-2">
+      <div class="h-1 w-full bg-zinc-200 dark:bg-zinc-800 rounded">
+        <div class="h-1 bg-blue-600 rounded" :style="{ width: Math.max(2, Math.min(100, progressPercent)) + '%' }"></div>
+      </div>
+      <div class="mt-1 text-xs text-zinc-500">{{ progressLabel || `Carregando (${progressPercent}%)…` }}</div>
+    </div>
 
     <!-- Barra de busca e filtros em uma linha (padrão de Clientes) -->
     <div class="card p-4 ">
@@ -1276,7 +2334,7 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
           </div>
           <input v-model="q" @keyup.enter="filter" @input="onSearchInput"
             class="w-full pl-10 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-600 dark:text-zinc-100"
-            :class="q ? 'pr-10' : 'pr-4'" placeholder="Buscar por nome, matrícula, email, CPF" />
+            :class="q ? 'pr-10' : 'pr-4'" placeholder="Buscar por nome (texto), matrícula (número) ou CPF (11 dígitos)" />
 
           <!-- Badges de filtros ativos dentro do input -->
           <div class="absolute inset-y-0 right-8 flex items-center gap-1 overflow-x-auto max-w-[55%] pr-1">
@@ -1396,7 +2454,7 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
 
         <!-- Botão de filtro por Funções (dropdown) -->
         <div class="relative">
-          <button @click="showFuncFilter = !showFuncFilter"
+          <button @click="onToggleFuncFilter"
             class="flex items-center gap-2 px-3 py-2 text-sm border border-zinc-300 rounded-lg hover:bg-zinc-50 dark:border-zinc-600 dark:hover:bg-zinc-800"
             :class="{ 'bg-blue-50 border-blue-300 text-blue-700 dark:bg-blue-900/20 dark:border-blue-600 dark:text-blue-300': showFuncFilter || funcaoFilter }">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1426,11 +2484,19 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
                     :class="funcaoFilter === FILTRO_SEM_FUNCAO ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">
                     Não preencheu ({{ funcaoCounts[FILTRO_SEM_FUNCAO] || 0 }})
                   </button>
-                  <template v-for="(count, f) in funcaoCounts" :key="f">
-                    <button v-if="f !== FILTRO_SEM_FUNCAO && f !== FILTRO_COM_FUNCAO" @click="funcaoFilter = f"
+                  <!-- Opções vindas do backend -->
+                  <div class="w-full" v-if="funcoesLoading">
+                    <span class="text-xs text-zinc-500">carregando…</span>
+                  </div>
+                  <template v-else>
+                    <div v-if="!funcoesOptions || funcoesOptions.length === 0" class="w-full flex items-center justify-between gap-2 text-xs text-zinc-500">
+                      <span>Nenhuma função encontrada</span>
+                      <button @click.stop="ensureFuncoesLoaded(true)" class="px-2 py-0.5 rounded border border-zinc-300 dark:border-zinc-600 hover:bg-zinc-50 dark:hover:bg-zinc-700">recarregar</button>
+                    </div>
+                    <button v-for="opt in funcoesOptions" :key="opt.id" @click="(selectedFuncaoId = opt.id, funcaoFilter = opt.name)"
                       class="px-2 py-1 text-[11px] rounded border transition-colors"
-                      :class="funcaoFilter === f ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">
-                      {{ f }} ({{ count }})
+                      :class="funcaoFilter === opt.name ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">
+                      {{ opt.name }}
                     </button>
                   </template>
                 </div>
@@ -1463,13 +2529,13 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
               <div>
                 <h3 class="text-sm font-medium text-zinc-900 dark:text-zinc-100 mb-2">Ordenar por</h3>
                 <div class="flex flex-wrap gap-1">
-                  <button @click="sortBy = 'nome'; filter(); showCombined = false"
+                  <button @click="sortBy = 'nome'; filter()"
                     class="px-2 py-1 text-xs rounded border transition-colors"
                     :class="sortBy === 'nome' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">nome</button>
-                  <button @click="sortBy = 'mais_recentes'; filter(); showCombined = false"
+                  <button @click="sortBy = 'mais_recentes'; filter()"
                     class="px-2 py-1 text-xs rounded border transition-colors"
                     :class="sortBy === 'mais_recentes' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">mais recentes</button>
-                  <button @click="sortBy = 'codigo'; filter(); showCombined = false"
+                  <button @click="sortBy = 'codigo'; filter()"
                     class="px-2 py-1 text-xs rounded border transition-colors"
                     :class="sortBy === 'codigo' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">código</button>
                 </div>
@@ -1490,13 +2556,13 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
               <div>
                 <h3 class="text-sm font-medium text-zinc-900 dark:text-zinc-100 mb-2">Documentos (vencimentos)</h3>
                 <div class="flex flex-wrap gap-1">
-                  <button @click="vencFotoPerfil = !vencFotoPerfil; filter(); showCombined = false" class="px-2 py-1 text-xs rounded border transition-colors"
+                  <button @click="vencFotoPerfil = !vencFotoPerfil; filter()" class="px-2 py-1 text-xs rounded border transition-colors"
                     :class="vencFotoPerfil ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">Foto perfil</button>
-                  <button @click="vencAtestado = !vencAtestado; filter(); showCombined = false" class="px-2 py-1 text-xs rounded border transition-colors"
+                  <button @click="vencAtestado = !vencAtestado; filter()" class="px-2 py-1 text-xs rounded border transition-colors"
                     :class="vencAtestado ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">Atestado médico</button>
-                  <button @click="vencAntecedentes = !vencAntecedentes; filter(); showCombined = false" class="px-2 py-1 text-xs rounded border transition-colors"
+                  <button @click="vencAntecedentes = !vencAntecedentes; filter()" class="px-2 py-1 text-xs rounded border transition-colors"
                     :class="vencAntecedentes ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">Antecedentes</button>
-                  <button @click="vencUniforme = !vencUniforme; filter(); showCombined = false" class="px-2 py-1 text-xs rounded border transition-colors"
+                  <button @click="vencUniforme = !vencUniforme; filter()" class="px-2 py-1 text-xs rounded border transition-colors"
                     :class="vencUniforme ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">Uniforme</button>
                 </div>
               </div>
@@ -1660,31 +2726,31 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
                   <template v-if="String(estadoFilter).toUpperCase() === 'SP'">
                     <button @click="regiaoFilter = ''" class="px-2 py-1 text-[11px] rounded border transition-colors"
                       :class="regiaoFilter === '' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">Todas
-                      ({{ totalPreRegiao }})</button>
-                    <button v-for="r in ['Zona Norte', 'Zona Sul', 'Zona Leste', 'Zona Oeste', 'Centro']" :key="r"
+                      ({{ uiRegiaoAll }})</button>
+                    <button v-for="r in SP_REGION_LABELS" :key="r"
                       @click="regiaoFilter = r" class="px-2 py-1 text-[11px] rounded border transition-colors"
                       :class="regiaoFilter === r ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">{{
-                      r }} ({{ (regiaoCounts && regiaoCounts[r]) || 0 }})</button>
+                      r }} ({{ (uiRegiaoCounts && uiRegiaoCounts[r]) || 0 }})</button>
                   </template>
                   <template v-else>
                     <button @click="regiaoFilter = ''" class="px-2 py-1 text-[11px] rounded border transition-colors"
                       :class="regiaoFilter === '' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">Todas
-                      ({{ totalPreRegiao }})</button>
+                      ({{ uiRegiaoAll }})</button>
                     <button @click="regiaoFilter = 'N'" class="px-2 py-1 text-[11px] rounded border transition-colors"
                       :class="regiaoFilter === 'N' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">Norte
-                      ({{ (regiaoCounts && regiaoCounts.N) || 0 }})</button>
+                      ({{ (uiRegiaoCounts && uiRegiaoCounts.N) || 0 }})</button>
                     <button @click="regiaoFilter = 'NE'" class="px-2 py-1 text-[11px] rounded border transition-colors"
                       :class="regiaoFilter === 'NE' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">Nordeste
-                      ({{ (regiaoCounts && regiaoCounts.NE) || 0 }})</button>
+                      ({{ (uiRegiaoCounts && uiRegiaoCounts.NE) || 0 }})</button>
                     <button @click="regiaoFilter = 'CO'" class="px-2 py-1 text-[11px] rounded border transition-colors"
                       :class="regiaoFilter === 'CO' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">Centro
-                      Oeste ({{ (regiaoCounts && regiaoCounts.CO) || 0 }})</button>
+                      Oeste ({{ (uiRegiaoCounts && uiRegiaoCounts.CO) || 0 }})</button>
                     <button @click="regiaoFilter = 'SE'" class="px-2 py-1 text-[11px] rounded border transition-colors"
                       :class="regiaoFilter === 'SE' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">Sudeste
-                      ({{ (regiaoCounts && regiaoCounts.SE) || 0 }})</button>
+                      ({{ (uiRegiaoCounts && uiRegiaoCounts.SE) || 0 }})</button>
                     <button @click="regiaoFilter = 'S'" class="px-2 py-1 text-[11px] rounded border transition-colors"
                       :class="regiaoFilter === 'S' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">Sul
-                      ({{ (regiaoCounts && regiaoCounts.S) || 0 }})</button>
+                      ({{ (uiRegiaoCounts && uiRegiaoCounts.S) || 0 }})</button>
                   </template>
                 </div>
               </div>
@@ -1799,7 +2865,7 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
 
     <!-- Cards de cooperados (como Clientes) -->
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-      <template v-if="loading">
+      <template v-if="loading || aggregating">
         <div v-for="n in 6" :key="'sk' + n" class="card space-y-2 p-3">
           <div class="h-4 w-2/3 rounded bg-zinc-200 dark:bg-zinc-800"></div>
           <div class="h-3 w-1/3 rounded bg-zinc-200 dark:bg-zinc-800"></div>
@@ -1926,9 +2992,20 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
             </dl>
           </div>
         </article>
+
+        <div v-if="!loading && visibleRows.length === 0" class="card p-6 text-center text-sm text-zinc-600 dark:text-zinc-300">
+          <div class="mb-2 font-medium">Nenhum cooperado encontrado com os filtros atuais.</div>
+          <div class="mb-3 text-xs">Revise a busca e os filtros aplicados ou limpe tudo para ver os resultados.</div>
+          <div class="flex items-center justify-center gap-2">
+            <button @click="clearAllFilters" class="px-3 py-1.5 rounded border border-zinc-300 dark:border-zinc-600 hover:bg-zinc-50 dark:hover:bg-zinc-800">
+              Limpar filtros
+            </button>
+          </div>
+        </div>
       </template>
     </div>
   </section>
+  
   
   <!-- Painel lateral de detalhes do cooperado -->
   <SidePanel v-if="viewMode !== 'page'" :open="showDetail" title="Detalhes do cooperado" @close="closeDetail">
@@ -1938,31 +3015,53 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
       <div class="h-3 w-1/3 rounded bg-zinc-200 dark:bg-zinc-800 animate-pulse"></div>
     </div>
     <div v-else-if="detail" class="space-y-4">
-      <!-- Cabeçalho compacto -->
-      <div class="flex items-start justify-between gap-3">
-        <div class="flex items-center gap-3 min-w-0">
-          <div class="h-16 w-16 rounded-full overflow-hidden bg-zinc-200 text-zinc-600 flex items-center justify-center ring-2 ring-zinc-300">
-            <img v-if="getAvatarUrl(detail)" :src="getAvatarUrl(detail)" alt="avatar" class="h-full w-full object-cover" />
-            <span v-else class="text-[12px] font-semibold">{{ getInitials(detail) }}</span>
-          </div>
-          <div class="min-w-0">
-            <div class="text-lg font-semibold truncate">{{ detail.nome || detail.name || '—' }}</div>
-            <div class="flex flex-wrap items-center gap-2 text-xs text-zinc-600 mt-1">
-              <span v-if="detail.cidade" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800">{{ detail.cidade }}<span v-if="detail.uf || detail.estado">/{{ detail.uf || detail.estado }}</span></span>
-              <span v-if="detail.status" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300">{{ detail.status }}</span>
-              <span v-if="detail.sexo" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">{{ detail.sexo }}</span>
-              <span v-if="detail.cooperativa" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200">{{ detail.cooperativa }}</span>
+      <!-- Cabeçalho dentro de um card -->
+      <div class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg p-3 shadow-sm">
+        <div class="flex items-start justify-between gap-3">
+          <div class="flex items-center gap-3 min-w-0">
+            <div class="h-28 w-20 rounded-none overflow-hidden bg-zinc-200 text-zinc-600 flex items-center justify-center ring-1 ring-zinc-300">
+              <img v-if="getAvatarUrl(detail)" :src="getAvatarUrl(detail)" alt="avatar" class="h-full w-full object-cover" />
+              <span v-else class="text-[12px] font-semibold">{{ getInitials(detail) }}</span>
             </div>
-            <div class="text-xs text-zinc-500 mt-1 truncate">Matrícula #{{ detail.matricula || detail.matricola || detail.registration || '-' }}</div>
+            <div class="min-w-0">
+              <div class="text-lg font-semibold truncate">{{ detail.nome || detail.name || '—' }}</div>
+              <div class="flex flex-wrap items-center gap-2 text-xs text-zinc-600 mt-1">
+                <span v-if="detail.cidade" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800">{{ detail.cidade }}<span v-if="detail.uf || detail.estado">/{{ detail.uf || detail.estado }}</span></span>
+                <span v-if="detail.status" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300">{{ detail.status }}</span>
+                <span v-if="detail.sexo" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">{{ detail.sexo }}</span>
+                <span v-if="detail.cooperativa" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200">{{ detail.cooperativa }}</span>
+              </div>
+              <div class="text-xs text-zinc-500 mt-1 truncate">Matrícula #{{ detail.matricula || detail.matricola || detail.registration || '-' }}</div>
+            </div>
           </div>
-        </div>
-        <div class="shrink-0">
-          <button @click="startEdit" class="h-9 w-9 inline-flex items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700" title="Editar">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 20h9"/>
-              <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-            </svg>
-          </button>
+          <div class="shrink-0 flex items-center gap-2 relative">
+            <button @click="startEdit" class="inline-flex items-center gap-2 h-9 px-3 rounded-md bg-blue-600 text-white hover:bg-blue-700" title="Editar">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 20h9"/>
+                <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+              </svg>
+              <span>Editar</span>
+            </button>
+            <div class="relative" @mouseleave="showDetailOptions = false">
+              <button @click="showDetailOptions = !showDetailOptions" class="inline-flex items-center gap-2 h-9 px-3 rounded-md border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800">
+                Opções
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.106l3.71-3.875a.75.75 0 111.08 1.04l-4.24 4.43a.75.75 0 01-1.08 0l-4.24-4.43a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
+              </button>
+              <div v-if="showDetailOptions" class="absolute right-0 mt-1 w-56 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-md shadow-lg z-10">
+                <ul class="py-1 text-sm">
+                  <li>
+                    <button class="w-full text-left px-3 py-2 hover:bg-zinc-50 dark:hover:bg-zinc-800" @click="copyEmail(detail.email); showDetailOptions=false">Copiar e-mail</button>
+                  </li>
+                  <li>
+                    <button class="w-full text-left px-3 py-2 hover:bg-zinc-50 dark:hover:bg-zinc-800" @click="openWhats(detail.telefone1); showDetailOptions=false">Abrir WhatsApp</button>
+                  </li>
+                  <li>
+                    <button class="w-full text-left px-3 py-2 hover:bg-zinc-50 dark:hover:bg-zinc-800" @click="showDetailOptions=false">Atualizar status…</button>
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1976,10 +3075,19 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
             <button @click="activeDetailTab = 'documentos'" :class="activeDetailTab === 'documentos' ? 'border-b-2 border-blue-600 text-blue-700' : 'text-zinc-600'" class="px-1 py-2">Documentos</button>
           </li>
           <li>
-            <button @click="activeDetailTab = 'pagamentos'" :class="activeDetailTab === 'pagamentos' ? 'border-b-2 border-blue-600 text-blue-700' : 'text-zinc-600'" class="px-1 py-2">Pagamentos</button>
+            <button @click="activeDetailTab = 'financeiro'" :class="activeDetailTab === 'financeiro' ? 'border-b-2 border-blue-600 text-blue-700' : 'text-zinc-600'" class="px-1 py-2">Financeiro</button>
           </li>
           <li>
             <button @click="activeDetailTab = 'presencas'" :class="activeDetailTab === 'presencas' ? 'border-b-2 border-blue-600 text-blue-700' : 'text-zinc-600'" class="px-1 py-2">Presenças</button>
+          </li>
+          <li>
+            <button @click="activeDetailTab = 'alertas'" :class="activeDetailTab === 'alertas' ? 'border-b-2 border-blue-600 text-blue-700' : 'text-zinc-600'" class="px-1 py-2">Alertas</button>
+          </li>
+          <li>
+            <button @click="activeDetailTab = 'ofertas'" :class="activeDetailTab === 'ofertas' ? 'border-b-2 border-blue-600 text-blue-700' : 'text-zinc-600'" class="px-1 py-2">Ofertas</button>
+          </li>
+          <li>
+            <button @click="activeDetailTab = 'agenda'" :class="activeDetailTab === 'agenda' ? 'border-b-2 border-blue-600 text-blue-700' : 'text-zinc-600'" class="px-1 py-2">Agenda</button>
           </li>
         </ul>
       </nav>
@@ -2081,35 +3189,119 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
             </div>
           </div>
         </div>
-        <!-- Form de edição -->
-        <div v-else class="space-y-3">
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <label class="text-sm">Nome
+        <!-- Form de edição mantendo a mesma disposição visual -->
+        <div v-else class="space-y-4">
+          <!-- Pessoais -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+            <label class="text-[11px] uppercase text-zinc-500">Nome
               <input v-model="(detail as any).nome" class="form-input w-full" />
             </label>
-            <label class="text-sm">Sexo
+            <label class="text-[11px] uppercase text-zinc-500">CPF
+              <input v-model="(detail as any).cpf" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">RG
+              <input v-model="(detail as any).rg" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Nascimento
+              <input v-model="(detail as any).dataNasc" type="date" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Sexo
               <select v-model="(detail as any).sexo" class="form-input w-full">
                 <option value="">-</option>
                 <option value="M">M</option>
                 <option value="F">F</option>
               </select>
             </label>
-            <label class="text-sm">Cidade
-              <input v-model="(detail as any).cidade" class="form-input w-full" />
-            </label>
-            <label class="text-sm">UF
-              <input v-model="(detail as any).uf" class="form-input w-full" />
-            </label>
-            <label class="text-sm">Cooperativa
+            <label class="text-[11px] uppercase text-zinc-500">Cooperativa
               <input v-model="(detail as any).cooperativa" class="form-input w-full" />
             </label>
-            <label class="text-sm">Status
+            <label class="text-[11px] uppercase text-zinc-500">Status
               <input v-model="(detail as any).status" class="form-input w-full" />
             </label>
+            <label class="text-[11px] uppercase text-zinc-500">Mãe
+              <input v-model="(detail as any).nomeMae" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Pai
+              <input v-model="(detail as any).nomePai" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Expedição (RG)
+              <input v-model="(detail as any).dataExp" type="date" class="form-input w-full" />
+            </label>
           </div>
+
+          <!-- Contato -->
+          <div class="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm border-t pt-3">
+            <label class="sm:col-span-2 text-[11px] uppercase text-zinc-500">E-mail
+              <input v-model="(detail as any).email" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Telefone 1
+              <input v-model="(detail as any).telefone1" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Telefone 2
+              <input v-model="(detail as any).telefone2" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Gestor
+              <input v-model="(detail as any).gestor" class="form-input w-full" />
+            </label>
+          </div>
+
+          <!-- Endereço -->
+          <div class="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm border-t pt-3">
+            <label class="text-[11px] uppercase text-zinc-500">Cidade
+              <input v-model="(detail as any).cidade" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">UF
+              <input v-model="(detail as any).uf" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Bairro
+              <input v-model="(detail as any).bairro" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Endereço
+              <input v-model="(detail as any).endereco" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Número
+              <input v-model="(detail as any).numero" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Complemento
+              <input v-model="(detail as any).complemento" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">CEP
+              <input v-model="(detail as any).cep" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Região
+              <input v-model="(detail as any).regiao" class="form-input w-full" />
+            </label>
+          </div>
+
+          <!-- Dados Bancários -->
+          <div class="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm border-t pt-3">
+            <label class="text-[11px] uppercase text-zinc-500">Tipo Pagamento
+              <input v-model="(detail as any).tipoPagto" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Banco
+              <input v-model="(detail as any).banco" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Agência
+              <input v-model="(detail as any).agencia" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Conta
+              <input v-model="(detail as any).conta" class="form-input w-full" />
+            </label>
+            <label class="text-[11px] uppercase text-zinc-500">Dígito da Conta
+              <input v-model="(detail as any).digConta" class="form-input w-full" />
+            </label>
+          </div>
+
+          <!-- Observações -->
+          <div class="sm:col-span-2 border-t pt-3">
+            <label class="text-[11px] uppercase text-zinc-500">Observações
+              <textarea v-model="(detail as any).observacoes" rows="3" class="form-input w-full"></textarea>
+            </label>
+          </div>
+
           <div class="flex justify-end gap-2">
-            <button @click="cancelEdit" class="px-3 py-1.5 rounded border">Cancelar</button>
-            <button @click="saveEdit" class="px-3 py-1.5 rounded bg-blue-600 text-white">Salvar</button>
+            <button @click="cancelEdit" class="px-3 h-9 rounded-md border border-zinc-300 dark:border-zinc-700">Cancelar</button>
+            <button @click="saveEdit" class="px-3 h-9 rounded-md bg-blue-600 text-white hover:bg-blue-700">Salvar</button>
           </div>
         </div>
       </div>
@@ -2143,9 +3335,9 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
         </div>
       </div>
 
-      <div v-else-if="activeDetailTab === 'pagamentos'">
+      <div v-else-if="activeDetailTab === 'financeiro'">
         <div class="pt-3">
-          <div class="text-[11px] uppercase text-zinc-500 mb-2">Histórico de Pagamentos</div>
+          <div class="text-[11px] uppercase text-zinc-500 mb-2">Financeiro</div>
           <div v-if="!payments.length" class="text-sm text-zinc-500">Sem registros.</div>
           <ul v-else class="divide-y divide-zinc-200 dark:divide-zinc-700 text-sm">
             <li v-for="(p, i) in payments" :key="'p'+i" class="py-2 flex items-center justify-between">
@@ -2172,6 +3364,24 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
               <div class="shrink-0 text-xs text-zinc-500">{{ c.status || '-' }}</div>
             </li>
           </ul>
+        </div>
+      </div>
+      <div v-else-if="activeDetailTab === 'alertas'">
+        <div class="pt-3">
+          <div class="text-[11px] uppercase text-zinc-500 mb-2">Alertas</div>
+          <div class="text-sm text-zinc-500">Sem alertas.</div>
+        </div>
+      </div>
+      <div v-else-if="activeDetailTab === 'ofertas'">
+        <div class="pt-3">
+          <div class="text-[11px] uppercase text-zinc-500 mb-2">Ofertas</div>
+          <div class="text-sm text-zinc-500">Sem ofertas.</div>
+        </div>
+      </div>
+      <div v-else-if="activeDetailTab === 'agenda'">
+        <div class="pt-3">
+          <div class="text-[11px] uppercase text-zinc-500 mb-2">Agenda</div>
+          <div class="text-sm text-zinc-500">Sem itens de agenda.</div>
         </div>
       </div>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
@@ -2311,6 +3521,25 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
               </div>
             </li>
           </ul>
+          <!-- URLs diretas (urlImg1..4), se existirem -->
+          <div class="mt-2 space-y-1">
+            <div v-if="detail.urlImg1" class="text-xs">
+              <span class="text-zinc-500 mr-1">Imagem 1:</span>
+              <a :href="detail.urlImg1" target="_blank" rel="noopener" class="text-blue-600 hover:underline">abrir</a>
+            </div>
+            <div v-if="detail.urlImg2" class="text-xs">
+              <span class="text-zinc-500 mr-1">Imagem 2:</span>
+              <a :href="detail.urlImg2" target="_blank" rel="noopener" class="text-blue-600 hover:underline">abrir</a>
+            </div>
+            <div v-if="detail.urlImg3" class="text-xs">
+              <span class="text-zinc-500 mr-1">Imagem 3:</span>
+              <a :href="detail.urlImg3" target="_blank" rel="noopener" class="text-blue-600 hover:underline">abrir</a>
+            </div>
+            <div v-if="detail.urlImg4" class="text-xs">
+              <span class="text-zinc-500 mr-1">Imagem 4:</span>
+              <a :href="detail.urlImg4" target="_blank" rel="noopener" class="text-blue-600 hover:underline">abrir</a>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -2340,20 +3569,19 @@ watch(limit, () => { if (initializing.value || syncing.value) return; pushStateT
       class="container max-w-[1400px] mx-auto flex flex-col sm:flex-row sm:items-center gap-2 justify-between text-sm">
       <span
         class="mt-1 text-blue-600 text-xs font-medium me-2 px-2.5 py-0.5 rounded-sm dark:bg-blue-900 dark:text-blue-300">
-        Exibindo {{ Math.min((page - 1) * limit + 1, isOfficialPaged ? total : filteredRows.length) }} • {{ Math.min(page * limit, (isOfficialPaged ? total : filteredRows.length)) }}
-        de {{ isOfficialPaged ? total : filteredRows.length }} registros</span>
-      <div class="inline-flex items-center gap-1">
-        <button @click="page = 1; pushStateToQuery(); load()" :disabled="page === 1" class="px-2 py-1 border rounded disabled:opacity-50">«</button>
-        <button @click="page = Math.max(1, page - 1); pushStateToQuery(); load()" :disabled="page === 1"
+        Exibindo {{ headerRangeStart }} • {{ headerRangeEnd }} de {{ displayTotal }} registros</span>
+  <div class="inline-flex items-center gap-1">
+        <button @click="goFirst()" :disabled="page === 1" class="px-2 py-1 border rounded disabled:opacity-50">«</button>
+        <button @click="goPrev()" :disabled="page === 1"
           class="px-2 py-1 border rounded disabled:opacity-50">‹</button>
         <template v-for="p in pageItems" :key="'p'+p">
           <span v-if="typeof p === 'string'" class="px-2 py-1 text-zinc-400">…</span>
-          <button v-else @click="page = p as number; pushStateToQuery(); load()" :class="(typeof p === 'number' && page === p) ? 'bg-blue-600 text-white border-blue-600' : ''"
+          <button v-else @click="goTo(p as number)" :class="(typeof p === 'number' && page === p) ? 'bg-blue-600 text-white border-blue-600' : ''"
             class="px-2 py-1 border rounded">{{ p }}</button>
         </template>
-        <button @click="page = Math.min(totalPages, page + 1); pushStateToQuery(); load()" :disabled="page === totalPages"
+        <button @click="goNext()" :disabled="hasKnownTotal ? (page === totalPages) : false"
           class="px-2 py-1 border rounded disabled:opacity-50">›</button>
-        <button @click="page = totalPages; pushStateToQuery(); load()" :disabled="page === totalPages"
+        <button v-if="hasKnownTotal" @click="goLast()" :disabled="page === totalPages"
           class="px-2 py-1 border rounded disabled:opacity-50">»</button>
       </div>
     </div>
