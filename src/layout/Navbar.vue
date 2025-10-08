@@ -1,6 +1,6 @@
 <template>
   <!-- Sidebar vertical full-height com logo e navegação -->
-  <aside class="fixed inset-y-0 left-0 z-40 flex w-60 flex-col gap-4 border-r bg-white px-4 py-4 dark:bg-zinc-900">
+  <aside class="fixed inset-y-0 left-0 z-40 flex w-60 flex-col gap-4 border-r border-zinc-200 bg-white px-4 py-4 dark:border-zinc-800 dark:bg-zinc-900">
     <!-- Logo + papel -->
     <div class="flex items-center gap-2 align-center">
       <img src="/icone-evsp.svg" alt="Logo" class="h-12 w-auto p-1" onerror="this.style.display='none'" />

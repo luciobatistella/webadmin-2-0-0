@@ -9,6 +9,20 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
+  server: {
+    proxy: {
+      '/api/infosimples': {
+        target: 'https://api.infosimples.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/infosimples/, ''),
+        configure: (proxy, options) => {
+          proxy.on('proxyReq', (proxyReq, req, res) => {
+            console.log('[Proxy] Enviando requisição para Infosimples:', req.url)
+          })
+        }
+      }
+    }
+  },
   plugins: [
     vue(),
     VitePWA({

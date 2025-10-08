@@ -7,3 +7,7 @@ declare module '*.vue' {
   export default component
 }
 
+interface ImportMetaEnv {
+  readonly "HdV8k8qIrMSMpt4wAovkq6bxZThYZoePSYas_1-N"?: string
+}
+

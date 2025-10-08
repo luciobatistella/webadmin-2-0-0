@@ -1157,6 +1157,14 @@ function normalizeText(s: unknown){
     .toLowerCase()
     .trim()
 }
+// Label amigável para sexo
+function sexoLabel(v: unknown): string {
+  const s = String(v || '').trim().toUpperCase()
+  if (!s) return ''
+  if (s.startsWith('M')) return 'Masculino'
+  if (s.startsWith('F')) return 'Feminino'
+  return String(v || '')
+}
 function getStatusCode(it: Row): number | null {
   // Procura código em múltiplos campos
   const candidates = [
@@ -2338,108 +2346,54 @@ watch(limit, () => {
 
           <!-- Badges de filtros ativos dentro do input -->
           <div class="absolute inset-y-0 right-8 flex items-center gap-1 overflow-x-auto max-w-[55%] pr-1">
-            <span v-if="estadoFilter"
-              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-200">
+            <!-- Cada badge é um botão clicável para limpar -->
+            <button v-if="estadoFilter" @click="clearEstado" type="button"
+              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-200 hover:opacity-90 active:scale-[0.98]">
               UF: {{ estadoFilter }}
-              <button @click="clearEstado" type="button" class="ml-1 hover:text-blue-900">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </span>
-            <span v-if="regiaoFilter"
-              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-200">
+            </button>
+            <button v-if="regiaoFilter" @click="clearRegiao" type="button"
+              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-200 hover:opacity-90 active:scale-[0.98]">
               Região: {{ regiaoFilter }}
-              <button @click="clearRegiao" type="button" class="ml-1 hover:text-green-900">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </span>
-            <span v-if="cidadeFilter"
-              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-200">
+            </button>
+            <button v-if="cidadeFilter" @click="clearCidade" type="button"
+              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-200 hover:opacity-90 active:scale-[0.98]">
               Cidade: {{ cidadeFilter }}
-              <button @click="clearCidade" type="button" class="ml-1 hover:text-purple-900">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </span>
-            <span v-if="sexoFilter"
-              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">
-              Sexo: {{ sexoFilter }}
-              <button @click="clearSexo" type="button" class="ml-1 hover:text-amber-900">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </span>
-            <span v-if="statusFilter !== 'nenhum'"
-              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-zinc-200 text-zinc-800 dark:bg-zinc-700 dark:text-zinc-200">
+            </button>
+            <button v-if="sexoFilter" @click="clearSexo" type="button"
+              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200 hover:opacity-90 active:scale-[0.98]">
+              {{ sexoLabel(sexoFilter) }}
+            </button>
+            <button v-if="statusFilter !== 'nenhum'" @click="clearStatus" type="button"
+              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-zinc-200 text-zinc-800 dark:bg-zinc-700 dark:text-zinc-200 hover:opacity-90 active:scale-[0.98]">
               Status: {{ statusFilter }}
-              <button @click="clearStatus" type="button" class="ml-1 hover:text-zinc-900 dark:hover:text-zinc-100">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </span>
-            <span v-if="funcaoFilter"
-              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200">
+            </button>
+            <button v-if="funcaoFilter" @click="clearFuncao" type="button"
+              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200 hover:opacity-90 active:scale-[0.98]">
               Função: {{ funcaoFilter }}
-              <button @click="clearFuncao" type="button" class="ml-1 hover:text-emerald-900">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </span>
+            </button>
 
-            <span v-if="opStatusFilter"
-              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-indigo-100 text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-200">
+            <button v-if="opStatusFilter" @click="clearOpStatus" type="button"
+              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-indigo-100 text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-200 hover:opacity-90 active:scale-[0.98]">
               Status Op.: {{ OP_STATUS_LABEL[opStatusFilter] || opStatusFilter }}
-              <button @click="clearOpStatus" type="button" class="ml-1 hover:text-indigo-900">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </span>
+            </button>
 
             <!-- Badges: vencimentos de documentos -->
-            <span v-if="vencFotoPerfil"
-              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-200">
+            <button v-if="vencFotoPerfil" @click="vencFotoPerfil = false" type="button"
+              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-200 hover:opacity-90 active:scale-[0.98]">
               Foto perfil venc.
-              <button @click="vencFotoPerfil = false" type="button" class="ml-1 hover:text-red-900">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </span>
-            <span v-if="vencAtestado"
-              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-200">
+            </button>
+            <button v-if="vencAtestado" @click="vencAtestado = false" type="button"
+              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-200 hover:opacity-90 active:scale-[0.98]">
               Atestado venc.
-              <button @click="vencAtestado = false" type="button" class="ml-1 hover:text-red-900">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </span>
-            <span v-if="vencAntecedentes"
-              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-200">
+            </button>
+            <button v-if="vencAntecedentes" @click="vencAntecedentes = false" type="button"
+              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-200 hover:opacity-90 active:scale-[0.98]">
               Antecedentes venc.
-              <button @click="vencAntecedentes = false" type="button" class="ml-1 hover:text-red-900">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </span>
-            <span v-if="vencUniforme"
-              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-200">
+            </button>
+            <button v-if="vencUniforme" @click="vencUniforme = false" type="button"
+              class="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-200 hover:opacity-90 active:scale-[0.98]">
               Uniforme venc.
-              <button @click="vencUniforme = false" type="button" class="ml-1 hover:text-red-900">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </span>
+            </button>
 
           </div>
 
@@ -3028,7 +2982,7 @@ watch(limit, () => {
               <div class="flex flex-wrap items-center gap-2 text-xs text-zinc-600 mt-1">
                 <span v-if="detail.cidade" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800">{{ detail.cidade }}<span v-if="detail.uf || detail.estado">/{{ detail.uf || detail.estado }}</span></span>
                 <span v-if="detail.status" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300">{{ detail.status }}</span>
-                <span v-if="detail.sexo" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">{{ detail.sexo }}</span>
+                <span v-if="detail.sexo" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">{{ sexoLabel(detail.sexo) }}</span>
                 <span v-if="detail.cooperativa" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200">{{ detail.cooperativa }}</span>
               </div>
               <div class="text-xs text-zinc-500 mt-1 truncate">Matrícula #{{ detail.matricula || detail.matricola || detail.registration || '-' }}</div>
@@ -3113,7 +3067,7 @@ watch(limit, () => {
           </div>
           <div>
             <div class="text-[11px] uppercase text-zinc-500">Sexo</div>
-            <div class="font-medium">{{ detail.sexo || detail.gender || '-' }}</div>
+            <div class="font-medium">{{ sexoLabel(detail.sexo || detail.gender) || '-' }}</div>
           </div>
           <!-- Contato -->
           <div class="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm border-t pt-3">
@@ -3402,7 +3356,7 @@ watch(limit, () => {
         </div>
         <div>
           <div class="text-[11px] uppercase text-zinc-500">Sexo</div>
-          <div class="font-medium">{{ detail.sexo || detail.gender || '-' }}</div>
+          <div class="font-medium">{{ sexoLabel(detail.sexo || detail.gender) || '-' }}</div>
         </div>
         <div>
           <div class="text-[11px] uppercase text-zinc-500">Mãe</div>
@@ -3592,10 +3546,10 @@ watch(limit, () => {
 <style scoped>
 /* Destaque com fundo e borda que desaparecem suavemente */
 .cooperado-highlight {
-  /* Aproximação de Tailwind bg-blue-100/50 (bg azul claro com 50% opacidade) */
-  background-color: rgba(219, 234, 254, 0.5) !important; /* blue-100 @ 50% */
-  border-color: rgb(59, 130, 246) !important; /* border-blue-500 */
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.22);
+  /* Aproximação de Tailwind bg-amber-100/50 (bg amarelo claro com 50% opacidade) */
+  background-color: rgba(254, 243, 199, 0.5) !important; /* amber-100 @ 50% */
+  border-color: rgb(245, 158, 11) !important; /* border-amber-500 */
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.22);
   transition: background-color 2.6s ease-out, border-color 2.6s ease-out, box-shadow 2.6s ease-out;
 }
 .cooperado-highlight {
@@ -3603,16 +3557,16 @@ watch(limit, () => {
 }
 @keyframes cooperadoFade {
   0% {
-    background-color: rgba(219, 234, 254, 0.5);
-    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.22);
+    background-color: rgba(254, 243, 199, 0.5);
+    box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.22);
   }
   30% {
-    background-color: rgba(219, 234, 254, 0.32);
-    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.18);
+    background-color: rgba(254, 243, 199, 0.32);
+    box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.18);
   }
   60% {
-    background-color: rgba(219, 234, 254, 0.16);
-    box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.10);
+    background-color: rgba(254, 243, 199, 0.16);
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.10);
   }
   100% {
     background-color: transparent;
