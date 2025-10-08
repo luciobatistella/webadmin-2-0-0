@@ -2098,8 +2098,7 @@ watch([q, sexoFilter, estadoFilter, cidadeFilter, statusFilter, opStatusFilter, 
 })
 
 function onCreate() {
-  // TODO: abrir modal/criar novo cooperado
-  console.log('[cooperados.create]')
+  router.push({ name: 'cooperado-new' })
 }
 
 

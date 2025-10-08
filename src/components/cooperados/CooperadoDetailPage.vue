@@ -750,7 +750,14 @@ function goBack(){
   else router.push({ name: 'cooperados' })
 }
 
-function startEdit(){ editing.value = true }
+function startEdit(){ 
+  const id = idParam.value
+  if (id && id !== 'new') {
+    router.push({ name: 'cooperado-edit', params: { id } })
+  } else {
+    editing.value = true
+  }
+}
 function cancelEdit(){ editing.value = false }
 async function saveEdit(){
   try{
@@ -789,11 +796,12 @@ watch(idParam, load)
 </script>
 
 <template>
-  <section>
-    <!-- Breadcrumb acima do título -->
-    <Breadcrumbs />
-    <!-- Cabeçalho com avatar e botão editar -->
-    <header class="mb-3 flex items-start justify-between gap-3 card p-3 mt-3">
+  <div>
+    <section>
+      <!-- Breadcrumb acima do título -->
+      <Breadcrumbs />
+      <!-- Cabeçalho com avatar e botão editar -->
+      <header class="mb-3 flex items-center justify-between gap-3 card p-3 mt-3">
       <div class="flex items-center gap-3 min-w-0">
         <div class="h-20 w-20 overflow-hidden bg-zinc-200 text-zinc-600 flex items-center justify-center ring-1 ring-zinc-300 rounded">
           <img
@@ -823,10 +831,10 @@ watch(idParam, load)
           </div>
         </div>
       </div>
-      <div class="shrink-0">
+      <div class="shrink-0 flex items-center">
         <button
           @click="startEdit"
-          class="h-7 px-2 inline-flex items-center gap-1 rounded-full bg-blue-600 text-white hover:bg-blue-700 text-xs"
+          class="rounded-full bg-[#0B61F3] px-3 py-1 text-sm font-semibold text-white shadow-sm hover:bg-blue-600 inline-flex items-center gap-2"
           title="Editar"
         >
           <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1199,4 +1207,5 @@ watch(idParam, load)
     </div>
   </teleport>
   <!--/ Modal de imagem -->
+  </div>
 </template>

@@ -170,6 +170,15 @@ async function tryEndpoints(method: 'get' | 'post' | 'put' | 'delete', variants:
   throw lastErr
 }
 
+// Cria novo cooperado
+export async function createCooperado(payload: any): Promise<any> {
+  return tryEndpoints('post', [
+    `webadmin/cooperados`,
+    `webadmin/cooperados/create`,
+    `webadmin/cooperado`,
+  ], payload)
+}
+
 // Atualiza dados do cooperado (depende do backend; tenta algumas rotas comuns)
 export async function updateCooperado(id: string | number, payload: any): Promise<any> {
   return tryEndpoints('put', [
@@ -177,6 +186,15 @@ export async function updateCooperado(id: string | number, payload: any): Promis
     `webadmin/cooperados/update/${id}`,
     `webadmin/cooperado/${id}`,
   ], payload)
+}
+
+// Deleta cooperado
+export async function deleteCooperado(id: string | number): Promise<any> {
+  return tryEndpoints('delete', [
+    `webadmin/cooperados/${id}`,
+    `webadmin/cooperados/delete/${id}`,
+    `webadmin/cooperado/${id}`,
+  ])
 }
 
 /** -------------------------------------------------------
