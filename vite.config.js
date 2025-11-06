@@ -13,9 +13,16 @@ export default defineConfig({
   build: {
     rollupOptions: {
       output: {
-        manualChunks: {
-          'vendor': ['vue', 'vue-router'],
-          'firebase': ['firebase/app', 'firebase/storage'],
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            if (id.includes('firebase')) {
+              return 'firebase'
+            }
+            if (id.includes('vue') || id.includes('vue-router')) {
+              return 'vendor'
+            }
+            return 'vendor-extra'
+          }
         },
       },
     },
