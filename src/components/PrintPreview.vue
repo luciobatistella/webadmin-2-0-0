@@ -9,7 +9,7 @@ const hasData = computed(() => (props.items || []).length > 0)
 
 <template>
   <div v-if="open" class="fixed inset-0 z-[1100] bg-black/40 flex items-center justify-center p-4">
-    <div class="max-h-[90vh] w-full max-w-5xl overflow-auto rounded-xl bg-white p-4 shadow-lg">
+    <div class="max-h-[90vh] w-full max-w-5xl overflow-auto rounded-xl bg-white p-4 shadow-lg dark:bg-zinc-900">
       <header class="mb-3 flex items-center justify-between">
         <h2 class="text-lg font-semibold">Pré-visualização para impressão</h2>
         <div class="space-x-2">
@@ -18,12 +18,12 @@ const hasData = computed(() => (props.items || []).length > 0)
         </div>
       </header>
       <div class="space-y-2">
-        <article v-for="it in items" :key="it.id" class="rounded border p-3">
+        <article v-for="it in items" :key="it.id" class="rounded border p-3 dark:border-zinc-700">
           <header class="flex items-center justify-between">
             <strong>{{ it.name || it.nome_comercial || it.razao_social }}</strong>
-            <span class="text-xs text-zinc-500">#{{ it.id }}</span>
+            <span class="text-xs text-zinc-500 dark:text-zinc-400">#{{ it.id }}</span>
           </header>
-          <div class="text-xs text-zinc-600">
+          <div class="text-xs text-zinc-600 dark:text-zinc-300">
             <div>Email: {{ it.email || '-' }}</div>
             <div>Documento: {{ it.cnpj || it.cpf_cnpj || it.document || '-' }}</div>
           </div>

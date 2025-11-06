@@ -216,20 +216,20 @@ onMounted(async () => {
     <!-- Dropdown -->
     <div 
       v-if="isOpen && !disabled"
-      class="absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-auto"
+      class="absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-auto dark:bg-zinc-800 dark:border-zinc-700"
     >
       <!-- Loading State -->
-      <div v-if="isLoading" class="px-4 py-3 text-sm text-gray-500">
+      <div v-if="isLoading" class="px-4 py-3 text-sm text-gray-500 dark:text-zinc-400">
         Carregando clientes...
       </div>
 
       <!-- No Results -->
       <div v-else-if="filteredClients.length === 0" class="px-4 py-3">
-        <div class="text-sm text-gray-500 mb-2">Nenhum cliente encontrado</div>
+        <div class="text-sm text-gray-500 mb-2 dark:text-zinc-400">Nenhum cliente encontrado</div>
         <button
           type="button"
           @click="createNewClient"
-          class="w-full text-left px-3 py-2 text-sm text-brand-600 hover:bg-brand-50 rounded-md border border-dashed border-brand-300"
+          class="w-full text-left px-3 py-2 text-sm text-brand-600 hover:bg-brand-50 rounded-md border border-dashed border-brand-300 dark:text-brand-400 dark:hover:bg-zinc-700 dark:border-zinc-600"
         >
           <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
@@ -245,15 +245,15 @@ onMounted(async () => {
           :key="client.id"
           type="button"
           @click="selectClient(client)"
-          class="w-full px-4 py-3 text-left hover:bg-gray-50 focus:bg-gray-50 focus:outline-none border-b border-gray-100 last:border-b-0"
+          class="w-full px-4 py-3 text-left hover:bg-gray-50 focus:bg-gray-50 focus:outline-none border-b border-gray-100 last:border-b-0 dark:hover:bg-zinc-700 dark:focus:bg-zinc-700 dark:border-zinc-700"
           :class="{
-            'bg-blue-50 border-blue-200': index === highlightedIndex
+            'bg-blue-50 border-blue-200 dark:bg-blue-900/30 dark:border-blue-700': index === highlightedIndex
           }"
         >
           <div class="flex items-center justify-between">
             <div class="flex-1 min-w-0">
-              <div class="font-medium text-gray-900 truncate">{{ client.nome }}</div>
-              <div class="text-sm text-gray-500 truncate">{{ client.email }}</div>
+              <div class="font-medium text-zinc-900 truncate dark:text-zinc-100">{{ client.nome }}</div>
+              <div class="text-sm text-gray-500 truncate dark:text-zinc-400">{{ client.email }}</div>
             </div>
             <div v-if="client.categoria" class="ml-2">
               <span class="badge badge-primary">{{ client.categoria }}</span>
@@ -266,7 +266,7 @@ onMounted(async () => {
           v-if="searchQuery && !filteredClients.some(c => c.nome.toLowerCase() === searchQuery.toLowerCase())"
           type="button"
           @click="createNewClient"
-          class="w-full px-4 py-3 text-left text-brand-600 hover:bg-brand-50 border-t border-gray-200"
+          class="w-full px-4 py-3 text-left text-brand-600 hover:bg-brand-50 border-t border-gray-200 dark:text-brand-400 dark:hover:bg-zinc-700 dark:border-zinc-700"
         >
           <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
@@ -277,23 +277,23 @@ onMounted(async () => {
     </div>
 
     <!-- Selected Client Info -->
-    <div v-if="selectedClient && !isOpen" class="mt-2 p-3 bg-green-50 border border-green-200 rounded-md">
+    <div v-if="selectedClient && !isOpen" class="mt-2 p-3 bg-green-50 border border-green-200 rounded-md dark:bg-green-900/20 dark:border-green-800">
       <div class="flex items-center justify-between">
         <div class="flex items-center gap-3">
-          <div class="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center">
-            <svg class="w-4 h-4 text-green-600" fill="currentColor" viewBox="0 0 20 20">
+          <div class="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center dark:bg-green-800">
+            <svg class="w-4 h-4 text-green-600 dark:text-green-300" fill="currentColor" viewBox="0 0 20 20">
               <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
             </svg>
           </div>
           <div>
-            <div class="font-medium text-green-900">{{ selectedClient.nome }}</div>
-            <div class="text-sm text-green-700">{{ selectedClient.email }}</div>
+            <div class="font-medium text-green-900 dark:text-green-200">{{ selectedClient.nome }}</div>
+            <div class="text-sm text-green-700 dark:text-green-300">{{ selectedClient.email }}</div>
           </div>
         </div>
         <button
           type="button"
           @click="selectedClient = null"
-          class="text-green-600 hover:text-green-800"
+          class="text-green-600 hover:text-green-800 dark:text-green-400 dark:hover:text-green-300"
         >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />

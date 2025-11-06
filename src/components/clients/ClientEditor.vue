@@ -30,13 +30,13 @@ function onSave(){
 
 <template>
   <div class="space-y-3">
-    <div class="mb-2 text-sm text-zinc-600">{{ props.editId ? 'Editar cliente' : 'Novo cliente' }}</div>
-    <div class="rounded-md border p-3 bg-white">
-      <div class="text-sm mb-2">Editor de Cliente (fake provisório). Depois substituímos pelos campos reais.</div>
-      <div class="text-xs text-zinc-500 mb-2">ID: {{ props.editId || 'novo' }}</div>
-      <pre class="text-xs overflow-auto max-h-80 bg-zinc-50 p-2 rounded">{{ JSON.stringify(props.form, null, 2) }}</pre>
+    <div class="mb-2 text-sm text-zinc-600 dark:text-zinc-300">{{ props.editId ? 'Editar cliente' : 'Novo cliente' }}</div>
+    <div class="rounded-md border p-3 bg-white dark:bg-zinc-800 dark:border-zinc-700">
+      <div class="text-sm mb-2 text-zinc-800 dark:text-zinc-100">Editor de Cliente (fake provisório). Depois substituímos pelos campos reais.</div>
+      <div class="text-xs text-zinc-500 mb-2 dark:text-zinc-400">ID: {{ props.editId || 'novo' }}</div>
+      <pre class="text-xs overflow-auto max-h-80 bg-zinc-50 p-2 rounded dark:bg-zinc-900 dark:text-zinc-200">{{ JSON.stringify(props.form, null, 2) }}</pre>
       <div class="mt-3 flex justify-end gap-2">
-        <button class="px-3 py-2 rounded border" @click="onSave">Salvar</button>
+        <button class="btn btn-secondary btn-sm" @click="onSave">Salvar</button>
       </div>
     </div>
   </div>

@@ -1,59 +1,59 @@
 <template>
   <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
     <!-- PERÍODO -->
-    <div class="bg-white p-4 rounded-lg border border-blue-200">
-      <div class="text-xs text-blue-600 uppercase font-medium mb-3">PERÍODO</div>
+    <div class="bg-white p-4 rounded-lg border border-blue-200 dark:bg-zinc-800 dark:border-zinc-700">
+      <div class="text-xs text-blue-600 uppercase font-medium mb-3 dark:text-blue-400">PERÍODO</div>
       <div class="flex flex-wrap gap-2">
-        <span v-if="countCurrentWeekday > 0" class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800 whitespace-nowrap">
+        <span v-if="countCurrentWeekday > 0" class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800 whitespace-nowrap dark:bg-blue-900/30 dark:text-blue-300">
           📅 {{ countCurrentWeekday }} {{ countCurrentWeekday === 1 ? 'dia útil' : 'dias úteis' }}
         </span>
-        <span v-if="countCurrentWeekend > 0" class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800 whitespace-nowrap">
+        <span v-if="countCurrentWeekend > 0" class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800 whitespace-nowrap dark:bg-orange-900/30 dark:text-orange-300">
           {{ countCurrentWeekend }} {{ countCurrentWeekend === 1 ? 'fim de semana' : 'fins de semana' }}
         </span>
       </div>
       <div v-if="resumo?.janelaInicioStr && resumo?.janelaFimStr" class="mt-2 flex flex-wrap gap-2">
-        <span v-for="(d, di) in datas" :key="'badge-dia-'+di" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium" :class="isFimDeSemana(d) ? 'bg-orange-100 text-orange-800 border border-orange-200' : 'bg-gray-100 text-gray-800'" :title="isFimDeSemana(d) ? 'Fim de semana' : 'Dia útil'">
+        <span v-for="(d, di) in datas" :key="'badge-dia-'+di" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium" :class="isFimDeSemana(d) ? 'bg-orange-100 text-orange-800 border border-orange-200 dark:bg-orange-900/30 dark:text-orange-300 dark:border-orange-700' : 'bg-gray-100 text-gray-800 dark:bg-zinc-700 dark:text-zinc-100'" :title="isFimDeSemana(d) ? 'Fim de semana' : 'Dia útil'">
           {{ d.split('-').reverse().join('/') }} das {{ resumo.janelaInicioStr.slice(0,5) }} às {{ resumo.janelaFimStr.slice(0,5) }}
         </span>
       </div>
     </div>
 
     <!-- OPERAÇÃO DIÁRIA -->
-    <div class="bg-white p-3 rounded-lg border border-blue-200">
-      <div class="text-xs text-blue-600 uppercase font-medium mb-2">OPERAÇÃO DIÁRIA</div>
+    <div class="bg-white p-3 rounded-lg border border-blue-200 dark:bg-zinc-800 dark:border-zinc-700">
+      <div class="text-xs text-blue-600 uppercase font-medium mb-2 dark:text-blue-400">OPERAÇÃO DIÁRIA</div>
       <div class="flex items-center gap-2 mb-1">
-        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 whitespace-nowrap">
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 whitespace-nowrap dark:bg-blue-900/30 dark:text-blue-300">
           ⏱️ {{ totalByType.horasTrabalho }}h trabalhadas
         </span>
       </div>
       <div class="flex items-center gap-2 mb-2">
-        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 whitespace-nowrap" title="Equipes por dia conforme escala e horas do dia">
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 whitespace-nowrap dark:bg-blue-900/30 dark:text-blue-300" title="Equipes por dia conforme escala e horas do dia">
           👥 {{ equipesPorDia }} {{ equipesPorDia === 1 ? 'equipe' : 'equipes' }}
         </span>
       </div>
       <div class="flex flex-wrap gap-2">
         <div v-if="resumo?.tiposTurno" class="mt-1 flex flex-wrap gap-2">
-          <span v-if="resumo.tiposTurno.manha>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 whitespace-nowrap">🌅 Manhã: {{ humanDuration(horasPorTurnoDiario.manha) }}</span>
-          <span v-if="resumo.tiposTurno.tarde>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 whitespace-nowrap">☀️ Tarde: {{ humanDuration(horasPorTurnoDiario.tarde) }}</span>
-          <span v-if="resumo.tiposTurno.noite>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 whitespace-nowrap">🌙 Noite: {{ humanDuration(horasPorTurnoDiario.noite) }}</span>
-          <span v-if="resumo.tiposTurno.madrugada>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 whitespace-nowrap">Madrugada: {{ humanDuration(horasPorTurnoDiario.madrugada) }}</span>
-          <span v-if="dailyExtraMinutes > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-50 text-orange-700 border border-orange-200 whitespace-nowrap">⚡ Hora extra: {{ humanDuration(dailyExtraMinutes) }}</span>
+          <span v-if="resumo.tiposTurno.manha>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 whitespace-nowrap dark:bg-yellow-900/30 dark:text-yellow-300">🌅 Manhã: {{ humanDuration(horasPorTurnoDiario.manha) }}</span>
+          <span v-if="resumo.tiposTurno.tarde>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 whitespace-nowrap dark:bg-orange-900/30 dark:text-orange-300">☀️ Tarde: {{ humanDuration(horasPorTurnoDiario.tarde) }}</span>
+          <span v-if="resumo.tiposTurno.noite>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 whitespace-nowrap dark:bg-blue-900/30 dark:text-blue-300">🌙 Noite: {{ humanDuration(horasPorTurnoDiario.noite) }}</span>
+          <span v-if="resumo.tiposTurno.madrugada>0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 whitespace-nowrap dark:bg-zinc-700 dark:text-zinc-100">Madrugada: {{ humanDuration(horasPorTurnoDiario.madrugada) }}</span>
+          <span v-if="dailyExtraMinutes > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-50 text-orange-700 border border-orange-200 whitespace-nowrap dark:bg-orange-900/20 dark:text-orange-300 dark:border-orange-700">⚡ Hora extra: {{ humanDuration(dailyExtraMinutes) }}</span>
         </div>
-        <span v-if="totalByType.noturnas > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">{{ totalByType.noturnas }}h noturnas</span>
-        <span v-if="totalByType.temPausa" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">🍽️ 1h almoço</span>
+        <span v-if="totalByType.noturnas > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-300">{{ totalByType.noturnas }}h noturnas</span>
+        <span v-if="totalByType.temPausa" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300">🍽️ 1h almoço</span>
       </div>
     </div>
 
     <!-- OPERAÇÃO TOTAL -->
-    <div class="bg-white p-3 rounded-lg border border-blue-200">
-      <div class="text-xs text-blue-600 uppercase font-medium mb-2">OPERAÇÃO TOTAL</div>
+    <div class="bg-white p-3 rounded-lg border border-blue-200 dark:bg-zinc-800 dark:border-zinc-700">
+      <div class="text-xs text-blue-600 uppercase font-medium mb-2 dark:text-blue-400">OPERAÇÃO TOTAL</div>
       <div class="flex items-center gap-2 mb-2">
-        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">🎯 {{ (resumo?.horasTotalPeriodo ?? 0).toFixed(0) }}h trabalhadas</span>
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300">🎯 {{ (resumo?.horasTotalPeriodo ?? 0).toFixed(0) }}h trabalhadas</span>
       </div>
       <div class="flex items-center gap-2 mb-2">
-        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">🧩 {{ totalTurnosPeriodo }} {{ totalTurnosPeriodo === 1 ? 'turno' : 'turnos' }} no período</span>
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-zinc-700 dark:text-zinc-100">🧩 {{ totalTurnosPeriodo }} {{ totalTurnosPeriodo === 1 ? 'turno' : 'turnos' }} no período</span>
       </div>
-      <span v-if="dailyExtraMinutes > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-50 text-orange-700 border border-orange-200">⚡ {{ humanDuration(dailyExtraMinutes * datas.length) }} extras no período</span>
+      <span v-if="dailyExtraMinutes > 0" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-50 text-orange-700 border border-orange-200 dark:bg-orange-900/20 dark:text-orange-300 dark:border-orange-700">⚡ {{ humanDuration(dailyExtraMinutes * datas.length) }} extras no período</span>
     </div>
   </div>
 </template>

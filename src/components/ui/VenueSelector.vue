@@ -243,16 +243,16 @@ onMounted(() => {
     <!-- Dropdown -->
     <div 
       v-if="isOpen && !disabled"
-      class="absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg max-h-80 overflow-auto"
+      class="absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg max-h-80 overflow-auto dark:bg-zinc-800 dark:border-zinc-700"
     >
       <!-- Loading State -->
-      <div v-if="isLoading" class="px-4 py-3 text-sm text-gray-500">
+      <div v-if="isLoading" class="px-4 py-3 text-sm text-gray-500 dark:text-zinc-400">
         Carregando locais...
       </div>
 
       <!-- No Client Selected -->
       <div v-else-if="!clientId" class="px-4 py-3">
-        <div class="text-sm text-gray-500 mb-2">
+        <div class="text-sm text-gray-500 mb-2 dark:text-zinc-400">
           <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
@@ -262,13 +262,13 @@ onMounted(() => {
 
       <!-- No Results -->
       <div v-else-if="filteredVenues.length === 0" class="px-4 py-3">
-        <div class="text-sm text-gray-500 mb-2">
+        <div class="text-sm text-gray-500 mb-2 dark:text-zinc-400">
           {{ clientId ? 'Este cliente não possui locais cadastrados' : 'Nenhum local encontrado' }}
         </div>
         <button
           type="button"
           @click="createNewVenue"
-          class="w-full text-left px-3 py-2 text-sm text-brand-600 hover:bg-brand-50 rounded-md border border-dashed border-brand-300"
+          class="w-full text-left px-3 py-2 text-sm text-brand-600 hover:bg-brand-50 rounded-md border border-dashed border-brand-300 dark:text-brand-400 dark:hover:bg-zinc-700 dark:border-zinc-600"
         >
           <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
@@ -284,28 +284,28 @@ onMounted(() => {
           :key="venue.id"
           type="button"
           @click="selectVenue(venue)"
-          class="w-full px-4 py-3 text-left hover:bg-gray-50 focus:bg-gray-50 focus:outline-none border-b border-gray-100 last:border-b-0"
+          class="w-full px-4 py-3 text-left hover:bg-gray-50 focus:bg-gray-50 focus:outline-none border-b border-gray-100 last:border-b-0 dark:hover:bg-zinc-700 dark:focus:bg-zinc-700 dark:border-zinc-700"
           :class="{
-            'bg-blue-50 border-blue-200': index === highlightedIndex
+            'bg-blue-50 border-blue-200 dark:bg-blue-900/30 dark:border-blue-700': index === highlightedIndex
           }"
         >
           <div class="flex items-start justify-between">
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2">
-                <div class="font-medium text-gray-900 truncate">{{ venue.nome }}</div>
+                <div class="font-medium text-zinc-900 truncate dark:text-zinc-100">{{ venue.nome }}</div>
                 <!-- Ícone para locais do cliente -->
-                <span v-if="clientId && venue.categoria === 'Local do Cliente'" class="text-blue-500" title="Local do cliente">
+                <span v-if="clientId && venue.categoria === 'Local do Cliente'" class="text-blue-500 dark:text-blue-400" title="Local do cliente">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
                   </svg>
                 </span>
               </div>
-              <div class="text-sm text-gray-500 truncate mt-1">{{ venue.endereco }}</div>
+              <div class="text-sm text-gray-500 truncate mt-1 dark:text-zinc-400">{{ venue.endereco }}</div>
               <div class="flex items-center gap-3 mt-2">
                 <span v-if="venue.categoria" class="badge" :class="venue.categoria === 'Local do Cliente' ? 'badge-success' : 'badge-primary'">
                   {{ venue.categoria }}
                 </span>
-                <span v-if="venue.capacidade" class="text-xs text-gray-500">
+                <span v-if="venue.capacidade" class="text-xs text-gray-500 dark:text-zinc-400">
                   <svg class="w-3 h-3 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
                   </svg>
@@ -321,7 +321,7 @@ onMounted(() => {
           v-if="searchQuery && !filteredVenues.some(v => v.nome.toLowerCase() === searchQuery.toLowerCase())"
           type="button"
           @click="createNewVenue"
-          class="w-full px-4 py-3 text-left text-brand-600 hover:bg-brand-50 border-t border-gray-200"
+          class="w-full px-4 py-3 text-left text-brand-600 hover:bg-brand-50 border-t border-gray-200 dark:text-brand-400 dark:hover:bg-zinc-700 dark:border-zinc-700"
         >
           <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
@@ -332,20 +332,20 @@ onMounted(() => {
     </div>
 
     <!-- Selected Venue Info -->
-    <div v-if="selectedVenue && !isOpen" class="mt-2 p-3 bg-green-50 border border-green-200 rounded-md">
+    <div v-if="selectedVenue && !isOpen" class="mt-2 p-3 bg-green-50 border border-green-200 rounded-md dark:bg-green-900/20 dark:border-green-800">
       <div class="flex items-center justify-between">
         <div class="flex items-center gap-3">
-          <div class="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center">
-            <svg class="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div class="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center dark:bg-green-800">
+            <svg class="w-4 h-4 text-green-600 dark:text-green-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 12.414a1 1 0 00-.707-.293H11.5a6.5 6.5 0 10-1.414 1.414v1.207a1 1 0 00.293.707l4.243 4.243a1 1 0 001.414-1.414z" />
             </svg>
           </div>
           <div>
-            <div class="font-medium text-green-900">{{ selectedVenue.nome }}</div>
-            <div class="text-sm text-green-700">{{ selectedVenue.endereco }}</div>
+            <div class="font-medium text-green-900 dark:text-green-200">{{ selectedVenue.nome }}</div>
+            <div class="text-sm text-green-700 dark:text-green-300">{{ selectedVenue.endereco }}</div>
             <div class="flex items-center gap-2 mt-1">
               <span v-if="selectedVenue.categoria" class="badge badge-success">{{ selectedVenue.categoria }}</span>
-              <span v-if="selectedVenue.capacidade" class="text-xs text-green-600">
+              <span v-if="selectedVenue.capacidade" class="text-xs text-green-600 dark:text-green-400">
                 até {{ selectedVenue.capacidade }} pessoas
               </span>
             </div>
@@ -354,7 +354,7 @@ onMounted(() => {
         <button
           type="button"
           @click="selectedVenue = null"
-          class="text-green-600 hover:text-green-800"
+          class="text-green-600 hover:text-green-800 dark:text-green-400 dark:hover:text-green-300"
         >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />

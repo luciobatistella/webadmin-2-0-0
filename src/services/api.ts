@@ -16,6 +16,23 @@ function getToken(): string | null {
 export function createApi(baseURL: string): AxiosInstance {
   const api = axios.create({ baseURL, timeout: 60000 })
 
+  // Debug opcional da baseURL e requisições (ativar com localStorage.setItem('debug:api','1'))
+  try {
+    const debug = typeof localStorage !== 'undefined' && localStorage.getItem('debug:api') === '1'
+    if (debug) {
+      console.log('[api] instancia criada', { baseURL })
+    }
+    api.interceptors.request.use(cfg => {
+      if (debug) {
+        try {
+          const full = (cfg.baseURL || '') + (cfg.url || '')
+          console.log('[api][request]', { method: (cfg.method || 'get').toUpperCase(), url: full })
+        } catch {}
+      }
+      return cfg
+    })
+  } catch {}
+
   api.interceptors.request.use(cfg => {
     const token = getToken()
     if (token) {

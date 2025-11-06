@@ -10,11 +10,18 @@ const loading = ref(false)
 const errorMessage = ref('')
 const formRef = ref<InstanceType<typeof CooperadoForm> | null>(null)
 
+// Garantir form zerado: ao abrir a página de criação, limpamos rascunhos
+try {
+  localStorage.removeItem('draft:cooperado-form')
+  localStorage.removeItem('draft:cooperado-funcoes')
+} catch {}
+
 async function handleSave(data: Record<string, any>) {
   loading.value = true
   errorMessage.value = ''
   
   try {
+    console.log('Payload a ser enviado:', data)
     const response = await createCooperado(data)
     
     // Sucesso - redirecionar para a página de detalhes
@@ -22,14 +29,32 @@ async function handleSave(data: Record<string, any>) {
     
     if (cooperadoId) {
       ;(window as any).$toast?.success?.('Cooperado cadastrado com sucesso!')
+      // Limpa rascunho salvo
+      try { (formRef.value as any)?.clearDraft?.() } catch {}
       router.push({ name: 'cooperado-detail', params: { id: String(cooperadoId) } })
     } else {
       ;(window as any).$toast?.success?.('Cooperado cadastrado com sucesso!')
+      try { (formRef.value as any)?.clearDraft?.() } catch {}
       router.push({ name: 'cooperados' })
     }
   } catch (error: any) {
     console.error('Erro ao criar cooperado:', error)
-    errorMessage.value = error?.message || 'Erro ao cadastrar cooperado. Tente novamente.'
+    console.error('Resposta do servidor:', error?.response?.data)
+    // Extrai mensagem mais útil do backend, se houver
+    const status = error?.response?.status
+    const responseData = error?.response?.data
+    const backendMsg = responseData?.message || responseData?.error || (Array.isArray(responseData?.errors) ? responseData.errors.join(', ') : '')
+    // Alguns backends retornam errors como objeto { field: msg }
+    let firstFieldMsg = ''
+    if (!backendMsg && responseData && typeof responseData.errors === 'object' && responseData.errors !== null) {
+      const firstKey = Object.keys(responseData.errors)[0]
+      if (firstKey) firstFieldMsg = String((responseData.errors as any)[firstKey])
+    }
+    const fallback = error?.message || 'Erro ao cadastrar cooperado. Tente novamente.'
+    errorMessage.value = backendMsg || firstFieldMsg || fallback
+    if (status && typeof status === 'number') {
+      errorMessage.value += ` (HTTP ${status})`
+    }
     ;(window as any).$toast?.error?.(errorMessage.value)
   } finally {
     loading.value = false
@@ -37,15 +62,20 @@ async function handleSave(data: Record<string, any>) {
 }
 
 function handleCancel() {
+  // Mantém rascunho ao cancelar para o usuário retomar depois
   router.push({ name: 'cooperados' })
 }
 
 function handleSubmit() {
   // Acionar submit do formulário
-  const form = (formRef.value as any)?.$el?.querySelector('form')
-  if (form) {
-    form.requestSubmit()
+  // Preferir método exposto; fallback para requestSubmit no elemento
+  const comp: any = formRef.value
+  if (comp?.requestSubmit) {
+    comp.requestSubmit()
+    return
   }
+  const form = comp?.$el?.querySelector?.('form')
+  form?.requestSubmit?.()
 }
 </script>
 

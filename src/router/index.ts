@@ -1,4 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw, type RouteLocationRaw } from 'vue-router'
+// Import estático para contornar falha de import dinâmico no CooperadoCreatePage
+import CooperadoCreatePage from '../components/cooperados/CooperadoCreatePage.vue'
 import { authGuard } from './guards'
 
 const routes: RouteRecordRaw[] = [
@@ -18,7 +20,7 @@ const routes: RouteRecordRaw[] = [
       { path: '/requests', name: 'requests', component: () => import('../views/RequestsView.vue'), meta: { title: 'Solicitações' } },
       { path: '/settings', name: 'settings', component: () => import('../views/SettingsView.vue'), meta: { title: 'Configurações' } },
       { path: '/cooperados', name: 'cooperados', component: () => import('../views/CooperadosView.vue'), meta: { title: 'Cooperados', keepAlive: true } },
-  { path: '/cooperados/new', name: 'cooperado-new', component: () => import('../components/cooperados/CooperadoCreatePage.vue'), meta: { title: 'Novo Cooperado' } },
+  { path: '/cooperados/new', name: 'cooperado-new', component: CooperadoCreatePage, meta: { title: 'Novo Cooperado' } },
   { path: '/cooperados/:id', name: 'cooperado-detail', component: () => import('../components/cooperados/CooperadoDetailPage.vue'), meta: { title: 'Detalhe do Cooperado' } },
   { path: '/cooperados/:id/edit', name: 'cooperado-edit', component: () => import('../components/cooperados/CooperadoEditPage.vue'), meta: { title: 'Editar Cooperado' } },
       { path: '/billing', name: 'billing', component: () => import('../views/BillingView.vue'), meta: { title: 'Faturamento', keepAlive: true } },

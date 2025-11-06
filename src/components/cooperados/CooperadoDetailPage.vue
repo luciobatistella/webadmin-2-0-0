@@ -2,7 +2,30 @@
 import { ref, onMounted, watch, computed, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Breadcrumbs from '@/components/Breadcrumbs.vue'
-import { getCooperado, listCooperadoPayments, listCooperadoCheckins, updateCooperado, listFuncoesCooperados } from '@/services/cooperados'
+import { getCooperado, listCooperadoPayments, listCooperadoCheckins, updateCooperado, listFuncoesCooperados, listAvisos, listEscalas } from '@/services/cooperados'
+
+// Função para parsear datas no formato 'dd/MM/yyyy HH:mm' ou ISO
+function parseDateString(dateStr: string | Date): number {
+  if (!dateStr) return NaN;
+  if (typeof dateStr === 'string' && dateStr.includes('/')) {
+    // Ex: 01/07/2025 12:15
+    const [d, m, rest] = dateStr.split('/');
+    const [y, time] = rest.split(' ');
+    const [h = '0', min = '0'] = (time || '').split(':');
+    return new Date(Number(y), Number(m) - 1, Number(d), Number(h), Number(min)).getTime();
+  }
+  return new Date(dateStr).getTime();
+}
+
+function compareTimes(real: string|Date, previsto: string|Date): 'late'|'ontime'|'early'|'' {
+  if (!real || !previsto) return '';
+  const r = parseDateString(real);
+  const p = parseDateString(previsto);
+  if (isNaN(r) || isNaN(p)) return '';
+  if (r > p) return 'late';
+  if (r === p) return 'ontime';
+  return 'early';
+}
 
 type Row = Record<string, any>
 
@@ -19,6 +42,23 @@ const checkins = ref<Row[]>([])
 // Lazy-load de históricos
 const extrasLoaded = ref(false)
 const extrasLoading = ref(false)
+// Lazy-load de avisos (alertas)
+const avisos = ref<Row[]>([])
+const avisosLoaded = ref(false)
+const avisosLoading = ref(false)
+const avisosFiltro = ref<string>('todos') // filtro por título
+const avisosFiltroStatus = ref<string>('todos') // filtro por status
+const avisosLimit = ref<number>(20) // limite de registros
+// Lazy-load de escalas (presenças)
+const escalas = ref<Row[]>([])
+const escalasLoaded = ref(false)
+const escalasLoading = ref(false)
+const escalasFiltroCliente = ref<string>('todos') // filtro por cliente
+const escalasFiltroStatus = ref<string>('todos') // filtro por status
+// Funções utilitárias para contagem de faltas e recusados (dependem de escalas)
+const totalFaltas = computed(() => escalas.value.filter(e => e.status === 'faltou' || e.status === 'falta').length)
+const totalRecusados = computed(() => escalas.value.filter(e => e.status === 'recusado').length)
+// (removidos contadores agregados antigos; agora usamos resumoCheckIn e resumoCheckOut)
 // Debug helpers
 const rawResponse = ref<any>(null)
 const rawDataArray = ref<any[] | null>(null)
@@ -26,6 +66,373 @@ const showDebug = computed(() => String(route.query.debug || '') === '1')
 const pageTitle = computed(() => {
   const f = form.value || {}
   return (f.nome || f.name || 'Cooperado') as string
+})
+
+// Avisos filtrados
+const avisosFiltrados = computed(() => {
+  let resultado = avisos.value
+  
+  // Filtrar por título
+  if (avisosFiltro.value !== 'todos') {
+    resultado = resultado.filter(aviso => aviso.titulo === avisosFiltro.value)
+  }
+  
+  // Filtrar por status
+  if (avisosFiltroStatus.value !== 'todos') {
+    resultado = resultado.filter(aviso => aviso.status === avisosFiltroStatus.value)
+  }
+  
+  return resultado
+})
+
+// Contadores por titulo
+const avisosContadores = computed(() => {
+  const contadores: Record<string, number> = {
+    todos: avisos.value.length
+  }
+  avisos.value.forEach(aviso => {
+    const titulo = aviso.titulo || 'Sem título'
+    if (titulo in contadores) {
+      contadores[titulo]++
+    } else {
+      contadores[titulo] = 1
+    }
+  })
+  return contadores
+})
+
+// Contadores por status
+const avisosContadoresStatus = computed(() => {
+  // Filtra primeiro por título se necessário
+  let avisosParaContar = avisos.value
+  if (avisosFiltro.value !== 'todos') {
+    avisosParaContar = avisos.value.filter(aviso => aviso.titulo === avisosFiltro.value)
+  }
+  
+  const contadores: Record<string, number> = {
+    todos: avisosParaContar.length
+  }
+  avisosParaContar.forEach(aviso => {
+    const status = aviso.status || 'sem status'
+    if (status in contadores) {
+      contadores[status]++
+    } else {
+      contadores[status] = 1
+    }
+  })
+  return contadores
+})
+
+// Títulos únicos para os filtros
+const titulosUnicos = computed(() => {
+  const titulos = new Set<string>()
+  avisos.value.forEach(aviso => {
+    if (aviso.titulo) {
+      titulos.add(aviso.titulo)
+    }
+  })
+  return Array.from(titulos).sort()
+})
+
+// Status únicos para os filtros (baseado no título selecionado)
+const statusUnicos = computed(() => {
+  // Filtra primeiro por título se necessário
+  let avisosFiltradosPorTitulo = avisos.value
+  if (avisosFiltro.value !== 'todos') {
+    avisosFiltradosPorTitulo = avisos.value.filter(aviso => aviso.titulo === avisosFiltro.value)
+  }
+  
+  const statuses = new Set<string>()
+  avisosFiltradosPorTitulo.forEach(aviso => {
+    if (aviso.status) {
+      statuses.add(aviso.status)
+    }
+  })
+  return Array.from(statuses).sort()
+})
+
+// Escalas filtradas
+const escalasFiltradas = computed(() => {
+  let resultado = escalas.value
+  
+  // Filtrar por cliente
+  if (escalasFiltroCliente.value !== 'todos') {
+    resultado = resultado.filter(escala => String(escala.evento?.id_cliente) === escalasFiltroCliente.value)
+  }
+  
+  // Filtrar por status
+  if (escalasFiltroStatus.value !== 'todos') {
+    resultado = resultado.filter(escala => escala.status === escalasFiltroStatus.value)
+  }
+  
+  return resultado
+})
+
+// Helper para diferença em minutos
+const toMinutesDiff = (real: any, previsto: any): number | null => {
+  if (!real || !previsto) return null
+  const r = parseDateString(real)
+  const p = parseDateString(previsto)
+  if (isNaN(r) || isNaN(p)) return null
+  return Math.round((r - p) / 60000)
+}
+
+// Helper para status inválidos que não entram nos "válidos"
+const isInvalidStatus = (status: any): boolean => {
+  const s = String(status || '').toLowerCase()
+  return s === 'sem vaga' || s === 'removido' || s === 'lido' || s === 'recusado' || s === 'falta' || s === 'faltou' || s === 'nao compareceu' || s === 'não compareceu'
+}
+
+// Resumo por faixas para Check-in
+const resumoCheckIn = computed(() => {
+  const counts = { adiantado: 0, pontual: 0, atrasado: 0, aposHorario: 0 }
+  for (const e of escalasFiltradas.value) {
+    if (isInvalidStatus(e.status)) continue
+    const d = toMinutesDiff(e.check_in_real, e.check_in)
+    if (d === null) continue
+    if (d <= -1 && d >= -15) counts.adiantado++
+    else if (d >= 0 && d <= 5) counts.pontual++
+    else if (d >= 6 && d <= 15) counts.atrasado++
+    else if (d >= 16) counts.aposHorario++
+  }
+  return counts
+})
+
+// Resumo por faixas para Check-out
+const resumoCheckOut = computed(() => {
+  const counts = { adiantado: 0, pontual: 0, atrasado: 0, aposHorario: 0 }
+  for (const e of escalasFiltradas.value) {
+    if (isInvalidStatus(e.status)) continue
+    const d = toMinutesDiff(e.check_out_real, e.check_out)
+    if (d === null) continue
+    if (d <= -1 && d >= -15) counts.adiantado++
+    else if (d >= 0 && d <= 5) counts.pontual++
+    else if (d >= 6 && d <= 15) counts.atrasado++
+    else if (d >= 16) counts.aposHorario++
+  }
+  return counts
+})
+
+// Termômetro: métricas e score
+const totalValidCheckIn = computed(() => {
+  const r = resumoCheckIn.value
+  return r.adiantado + r.pontual + r.atrasado + r.aposHorario
+})
+const punctualidadePct = computed(() => {
+  const r = resumoCheckIn.value
+  const total = totalValidCheckIn.value
+  if (!total) return 0
+  return ((r.adiantado + r.pontual) / total) * 100
+})
+const totalEventos = computed(() => escalas.value.length)
+const confirmadosCount = computed(() => escalas.value.filter(e => e.confirmado_ida_evento).length)
+const presencaPct = computed(() => {
+  const tot = totalEventos.value
+  if (!tot) return 0
+  return (confirmadosCount.value / tot) * 100
+})
+const checkOutCount = computed(() => escalas.value.filter(e => e.confirmado_ida_evento && e.check_out_real).length)
+const checkOutPct = computed(() => {
+  const denom = confirmadosCount.value
+  if (!denom) return 0
+  return (checkOutCount.value / denom) * 100
+})
+const avaliacaoAvg = computed(() => {
+  const vals = escalas.value
+    .map(e => Number(e.avaliacao))
+    .filter(v => !isNaN(v) && v > 0)
+  if (!vals.length) return 0
+  return vals.reduce((a, b) => a + b, 0) / vals.length
+})
+const avaliacaoPct = computed(() => {
+  if (!avaliacaoAvg.value) return 0
+  return Math.min(100, (avaliacaoAvg.value / 5) * 100)
+})
+// Check-in score por faixas (inclui sem registro = 0)
+const checkInScorePct = computed(() => {
+  const total = escalasFiltradas.value.length
+  if (!total) return 0
+  let points = 0
+  for (const e of escalasFiltradas.value) {
+    // classifica pela diferença de check-in
+    const d = toMinutesDiff(e.check_in_real, e.check_in)
+    if (d === null || isInvalidStatus(e.status)) {
+      points += 0 // sem registro/ inválido
+      continue
+    }
+    if (d <= -1 && d >= -15) points += 100 // Adiantado
+    else if (d >= 0 && d <= 5) points += 90 // Pontual
+    else if (d >= 6 && d <= 15) points += 70 // Atrasado
+    else if (d >= 16) points += 40 // Após o horário
+  }
+  return points / total
+})
+// Termômetro final com novos pesos: CI 40%, Presença 25%, CO 10%, Pontualidade 15%, Avaliação 10%
+const finalScore = computed(() => {
+  const s = (checkInScorePct.value * 0.4)
+          + (presencaPct.value * 0.25)
+          + (checkOutPct.value * 0.1)
+          + (punctualidadePct.value * 0.15)
+          + (avaliacaoPct.value * 0.1)
+  return Number(s.toFixed(1))
+})
+const classificacao = computed(() => {
+  const s = finalScore.value
+  if (s < 50) return 'Ruim'
+  if (s < 75) return 'Regular'
+  return 'Excelente'
+})
+const thermoBarClass = computed(() => {
+  const s = finalScore.value
+  if (s < 50) return 'bg-red-500'
+  if (s < 75) return 'bg-amber-500'
+  return 'bg-green-500'
+})
+const thermoBadgeClass = computed(() => {
+  const s = finalScore.value
+  if (s < 50) return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+  if (s < 75) return 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
+  return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+})
+const thermoStrokeClass = computed(() => {
+  const s = finalScore.value
+  if (s < 50) return 'stroke-red-500'
+  if (s < 75) return 'stroke-amber-500'
+  return 'stroke-green-500'
+})
+
+// BG do card de Histórico acompanhando a classificação/termômetro
+const thermoCardBgClass = computed(() => {
+  const s = finalScore.value
+  if (s < 50) return 'bg-red-50 dark:bg-red-900/20'
+  if (s < 75) return 'bg-amber-50 dark:bg-amber-900/20'
+  return 'bg-green-50 dark:bg-green-900/20'
+})
+
+// Helpers p/ gráficos redondos (SVG)
+const ringR = 18
+const ringC = 2 * Math.PI * ringR
+function dashOffset(p: number){
+  const pct = Math.max(0, Math.min(100, Number(p) || 0))
+  return ringC - (ringC * pct / 100)
+}
+
+// Contador de "Sem registro" (check-in sem real/previsto ou status inválido)
+const semRegistroCheckIn = computed(() => {
+  return escalasFiltradas.value.filter(e => isInvalidStatus(e.status) || !e.check_in || !e.check_in_real).length
+})
+
+// Clientes únicos das escalas
+const escalasClientesUnicos = computed(() => {
+  const clientes = new Map<string, string>()
+  escalas.value.forEach(escala => {
+    const idCliente = escala.evento?.id_cliente
+    if (idCliente) {
+      // Armazena id_cliente como chave e um nome amigável se existir
+      const nomeCliente = escala.evento?.nome_cliente || `Cliente ${idCliente}`
+      clientes.set(String(idCliente), nomeCliente)
+    }
+  })
+  return Array.from(clientes.entries())
+    .sort((a, b) => a[1].localeCompare(b[1]))
+    .map(([id, nome]) => ({ id, nome }))
+})
+
+// Status únicos das escalas (baseado no filtro de cliente)
+const escalasStatusUnicos = computed(() => {
+  // Filtra primeiro por cliente se necessário
+  let escalasParaContar = escalas.value
+  if (escalasFiltroCliente.value !== 'todos') {
+    escalasParaContar = escalas.value.filter(escala => 
+      String(escala.evento?.id_cliente) === escalasFiltroCliente.value
+    )
+  }
+  
+  const statuses = new Set<string>()
+  escalasParaContar.forEach(escala => {
+    if (escala.status) {
+      statuses.add(escala.status)
+    }
+  })
+  return Array.from(statuses).sort()
+})
+
+// Contadores por cliente das escalas
+const escalasContadoresCliente = computed(() => {
+  const contadores: Record<string, number> = {
+    todos: escalas.value.length
+  }
+  escalas.value.forEach(escala => {
+    const idCliente = String(escala.evento?.id_cliente || 'sem cliente')
+    if (idCliente in contadores) {
+      contadores[idCliente]++
+    } else {
+      contadores[idCliente] = 1
+    }
+  })
+  return contadores
+})
+
+// Contadores por status das escalas (considerando filtro de cliente)
+const escalasContadoresStatus = computed(() => {
+  // Filtra primeiro por cliente se necessário
+  let escalasParaContar = escalas.value
+  if (escalasFiltroCliente.value !== 'todos') {
+    escalasParaContar = escalas.value.filter(escala => 
+      String(escala.evento?.id_cliente) === escalasFiltroCliente.value
+    )
+  }
+  
+  const contadores: Record<string, number> = {
+    todos: escalasParaContar.length
+  }
+  escalasParaContar.forEach(escala => {
+    const status = escala.status || 'sem status'
+    if (status in contadores) {
+      contadores[status]++
+    } else {
+      contadores[status] = 1
+    }
+  })
+  return contadores
+})
+
+// Totais de horas trabalhadas
+const escalasTotaisHoras = computed(() => {
+  let escalasParaCalcular = escalas.value
+  
+  // Aplica filtros se necessário
+  if (escalasFiltroCliente.value !== 'todos') {
+    escalasParaCalcular = escalasParaCalcular.filter(escala => 
+      String(escala.evento?.id_cliente) === escalasFiltroCliente.value
+    )
+  }
+  
+  if (escalasFiltroStatus.value !== 'todos') {
+    escalasParaCalcular = escalasParaCalcular.filter(escala => 
+      escala.status === escalasFiltroStatus.value
+    )
+  }
+  
+  let totalNormais = 0
+  let totalExtras = 0
+  let totalNoturnas = 0
+  let totalGeral = 0
+  
+  escalasParaCalcular.forEach(escala => {
+    if (escala.horas_normais) totalNormais += Number(escala.horas_normais) / 60
+    if (escala.horas_extras) totalExtras += Number(escala.horas_extras) / 60
+    if (escala.horas_noturnas) totalNoturnas += Number(escala.horas_noturnas) / 60
+  })
+  
+  totalGeral = totalNormais + totalExtras + totalNoturnas
+  
+  return {
+    normais: totalNormais,
+    extras: totalExtras,
+    noturnas: totalNoturnas,
+    geral: totalGeral
+  }
 })
 
 function resolveCooperadoId(it: Row | null | undefined): string | number | null {
@@ -128,6 +535,21 @@ function formatDate(val: unknown): string {
     const mm = String(d.getMonth() + 1).padStart(2, '0')
     const yyyy = d.getFullYear()
     return `${dd}/${mm}/${yyyy}`
+  } catch { return '-' }
+}
+
+function formatDateTime(val: unknown): string {
+  if (!val) return '-'
+  try {
+    const s = String(val)
+    const d = new Date(s)
+    if (isNaN(d.getTime())) return '-'
+    const dd = String(d.getDate()).padStart(2, '0')
+    const mm = String(d.getMonth() + 1).padStart(2, '0')
+    const yyyy = d.getFullYear()
+    const hh = String(d.getHours()).padStart(2, '0')
+    const min = String(d.getMinutes()).padStart(2, '0')
+    return `${dd}/${mm}/${yyyy} ${hh}:${min}`
   } catch { return '-' }
 }
 
@@ -714,6 +1136,9 @@ async function load(){
     payments.value = []
     checkins.value = []
     extrasLoaded.value = false
+    // avisos: resetar cache ao trocar de cooperado
+    avisos.value = []
+    avisosLoaded.value = false
   } finally { loading.value = false }
 }
 
@@ -736,6 +1161,113 @@ async function ensureExtrasLoaded(){
   } finally {
     extrasLoading.value = false
   }
+}
+
+async function ensureAvisosLoaded(){
+  if (avisosLoaded.value) return
+  const id = idParam.value
+  if (!id || id === 'new') return
+  
+  // Extrai cooperativa e matrícula do form
+  const cooperativa = (form.value as any)?.cooperativa
+  const matricula = (form.value as any)?.matricula
+  
+  if (!cooperativa || !matricula) {
+    console.warn('[CooperadoDetail] Avisos: cooperativa ou matricula não disponível', { cooperativa, matricula })
+    avisos.value = []
+    avisosLoaded.value = true
+    return
+  }
+  
+  try {
+    avisosLoading.value = true
+    // Passa cooperativa e matricula como parâmetros
+    const params = new URLSearchParams({
+      cooperativa: String(cooperativa),
+      matricula: String(matricula),
+      limit: String(avisosLimit.value)
+    })
+    const result = await listAvisos(params)
+    avisos.value = Array.isArray(result) ? result : []
+    avisosLoaded.value = true
+  } catch (e) {
+    console.error('[CooperadoDetail] Erro ao carregar avisos:', e)
+    avisos.value = []
+  } finally {
+    avisosLoading.value = false
+  }
+}
+
+// Função para recarregar avisos quando o limite mudar
+async function reloadAvisos() {
+  avisosLoaded.value = false
+  await ensureAvisosLoaded()
+}
+
+async function ensureEscalasLoaded(){
+  if (escalasLoaded.value) return
+  const id = idParam.value
+  if (!id || id === 'new') return
+  
+  // Extrai cooperativa e matrícula do form
+  const cooperativa = (form.value as any)?.cooperativa
+  const matricula = (form.value as any)?.matricula
+  
+  if (!cooperativa || !matricula) {
+    console.warn('[CooperadoDetail] Escalas: cooperativa ou matricula não disponível', { cooperativa, matricula })
+    escalas.value = []
+    escalasLoaded.value = true
+    return
+  }
+  
+  try {
+    escalasLoading.value = true
+    let todasEscalas: any[] = []
+    let paginaAtual = 0
+    let totalPaginas = 1
+    
+    // Loop para buscar todas as páginas
+    while (paginaAtual < totalPaginas) {
+      const params = new URLSearchParams({
+        cooperativa: String(cooperativa),
+        matricula: String(matricula),
+        page: String(paginaAtual),
+        limit: '100' // Busca 100 por vez
+      })
+      
+      console.log(`[CooperadoDetail] Carregando escalas - página ${paginaAtual + 1}`)
+      const response = await listEscalas(params)
+      
+      // Se a resposta tem estrutura de paginação
+      if (response && typeof response === 'object' && 'data' in response) {
+        const dados = response.data || []
+        todasEscalas = todasEscalas.concat(dados)
+        totalPaginas = response.totalPages || 1
+        console.log(`[CooperadoDetail] Página ${paginaAtual + 1}/${totalPaginas} - ${dados.length} registros (total acumulado: ${todasEscalas.length})`)
+      } else if (Array.isArray(response)) {
+        // Se veio array direto, não tem paginação
+        todasEscalas = response
+        break
+      }
+      
+      paginaAtual++
+    }
+    
+    console.log('[CooperadoDetail] Total de escalas carregadas:', todasEscalas.length)
+    escalas.value = todasEscalas
+    escalasLoaded.value = true
+  } catch (e) {
+    console.error('[CooperadoDetail] Erro ao carregar escalas:', e)
+    escalas.value = []
+  } finally {
+    escalasLoading.value = false
+  }
+}
+
+// Função para recarregar escalas
+async function reloadEscalas() {
+  escalasLoaded.value = false
+  await ensureEscalasLoaded()
 }
 
 function goBack(){
@@ -788,18 +1320,46 @@ onBeforeUnmount(() => {
 })
 // Lazy-load quando o usuário abrir as abas que dependem de históricos
 watch(activeTab, async (tab) => {
-  if (tab === 'financeiro' || tab === 'presencas') {
+  if (tab === 'financeiro') {
     await ensureExtrasLoaded()
+  }
+  if (tab === 'alertas') {
+    await ensureAvisosLoaded()
+  }
+  if (tab === 'presencas' || tab === 'perfil') {
+    await ensureEscalasLoaded()
   }
 })
 watch(idParam, load)
+
+// Resetar filtro de status quando o filtro de título mudar
+watch(avisosFiltro, () => {
+  avisosFiltroStatus.value = 'todos'
+})
+
+watch(escalasFiltroCliente, () => {
+  escalasFiltroStatus.value = 'todos'
+})
 </script>
 
 <template>
   <div>
     <section>
-      <!-- Breadcrumb acima do título -->
-      <Breadcrumbs />
+      <!-- Breadcrumb acima do título + botão Editar -->
+      <div class="flex items-center justify-between">
+        <Breadcrumbs />
+        <button
+          @click="startEdit"
+          class="rounded-full bg-[#0B61F3] px-3 py-1 text-sm font-semibold text-white shadow-sm hover:bg-blue-600 inline-flex items-center gap-2"
+          title="Editar"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 20h9"/>
+            <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+          </svg>
+          <span>Editar</span>
+        </button>
+      </div>
       <!-- Cabeçalho com avatar e botão editar -->
       <header class="mb-3 flex items-center justify-between gap-3 card p-3 mt-3">
       <div class="flex items-center gap-3 min-w-0">
@@ -810,7 +1370,7 @@ watch(idParam, load)
             class="h-full w-full object-cover cursor-zoom-in"
             @click="openImage(getAvatarUrl(form))"
           />
-          <span v-else class="text-[12px] font-semibold">{{ getInitials(form) }}</span>
+          <span v-else class="text-[12px] font-semibold"></span>
         </div>
         <div class="min-w-0">
           <h1 class="text-2xl font-semibold text-zinc-900 dark:text-zinc-100 truncate">
@@ -831,19 +1391,7 @@ watch(idParam, load)
           </div>
         </div>
       </div>
-      <div class="shrink-0 flex items-center">
-        <button
-          @click="startEdit"
-          class="rounded-full bg-[#0B61F3] px-3 py-1 text-sm font-semibold text-white shadow-sm hover:bg-blue-600 inline-flex items-center gap-2"
-          title="Editar"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 20h9"/>
-            <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-          </svg>
-          <span>Editar</span>
-        </button>
-      </div>
+      
     </header>
 
     <!-- Abas -->
@@ -863,6 +1411,8 @@ watch(idParam, load)
       <div class="mt-2 h-4 w-1/3 bg-zinc-200 rounded"></div>
     </div>
     <div v-else class="space-y-3">
+      <!-- ...conteúdo existente... -->
+    </div>
       <!-- Perfil -->
       <div v-if="activeTab==='perfil'" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
         <!-- Coluna 1: Informações Pessoais + Funções -->
@@ -1015,106 +1565,192 @@ watch(idParam, load)
           </div>
         </div>
 
-        <!-- Coluna 3: Documentos -->
-        <div class="card p-4 h-full">
-          <div class="flex items-center justify-between mb-2">
-            <div class="text-[11px] uppercase text-zinc-500">Documentos</div>
-            <div class="flex items-center gap-1">
-              <span v-if="docFlags.foto" class="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700">Foto perfil vencida</span>
-              <span v-if="docFlags.atestado" class="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700">Atestado vencido</span>
-              <span v-if="docFlags.antecedentes" class="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700">Antecedentes vencidos</span>
-              <span v-if="docFlags.uniforme" class="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700">Uniforme vencido</span>
+        <!-- Coluna 3: Histórico + Documentos -->
+        <div class="flex flex-col gap-3">
+          <!-- Card: Histórico do Cooperado -->
+          <div class="card p-4" :class="thermoCardBgClass">
+            <div class="mb-3 flex items-center justify-between">
+              <div class="text-[11px] uppercase text-zinc-500">Histórico do Cooperado</div>
+              <span :class="['px-2 py-0.5 rounded text-[10px] font-medium ml-auto', thermoBadgeClass]">{{ classificacao }}</span>
+            </div>
+            <!-- Gráficos redondos (lado a lado) -->
+            <div class="flex items-center gap-6 flex-wrap">
+              <!-- Final (colorido) -->
+              <div class="text-center">
+                <div class="relative w-16 h-16">
+                  <svg viewBox="0 0 44 44" class="w-16 h-16 rotate-[-90deg]">
+                    <circle cx="22" cy="22" r="18" class="stroke-zinc-200 dark:stroke-zinc-700" stroke-width="4" fill="none" />
+                    <circle cx="22" cy="22" r="18" :class="thermoStrokeClass" stroke-width="4" fill="none"
+                      :stroke-dasharray="ringC" :stroke-dashoffset="dashOffset(finalScore)" stroke-linecap="round" />
+                  </svg>
+                  <div class="absolute inset-0 flex items-center justify-center">
+                    <span class="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{{ finalScore.toFixed(0) }}%</span>
+                  </div>
+                </div>
+                <div class="mt-1 text-[10px] text-zinc-600 dark:text-zinc-300">Classificação</div>
+              </div>
+
+              <!-- Check-in -->
+              <div class="text-center">
+                <div class="relative w-16 h-16">
+                  <svg viewBox="0 0 44 44" class="w-16 h-16 rotate-[-90deg]">
+                    <circle cx="22" cy="22" r="18" class="stroke-zinc-200 dark:stroke-zinc-700" stroke-width="4" fill="none" />
+                    <circle cx="22" cy="22" r="18" class="stroke-zinc-500 dark:stroke-zinc-300" stroke-width="4" fill="none"
+                      :stroke-dasharray="ringC" :stroke-dashoffset="dashOffset(checkInScorePct)" stroke-linecap="round" />
+                  </svg>
+                  <div class="absolute inset-0 flex items-center justify-center">
+                    <span class="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{{ checkInScorePct.toFixed(0) }}%</span>
+                  </div>
+                </div>
+                <div class="mt-1 text-[10px] text-zinc-600 dark:text-zinc-300">Check-in</div>
+              </div>
+
+              <!-- Checkout -->
+              <div class="text-center">
+                <div class="relative w-16 h-16">
+                  <svg viewBox="0 0 44 44" class="w-16 h-16 rotate-[-90deg]">
+                    <circle cx="22" cy="22" r="18" class="stroke-zinc-200 dark:stroke-zinc-700" stroke-width="4" fill="none" />
+                    <circle cx="22" cy="22" r="18" class="stroke-zinc-500 dark:stroke-zinc-300" stroke-width="4" fill="none"
+                      :stroke-dasharray="ringC" :stroke-dashoffset="dashOffset(checkOutPct)" stroke-linecap="round" />
+                  </svg>
+                  <div class="absolute inset-0 flex items-center justify-center">
+                    <span class="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{{ checkOutPct.toFixed(0) }}%</span>
+                  </div>
+                </div>
+                <div class="mt-1 text-[10px] text-zinc-600 dark:text-zinc-300">Checkout</div>
+              </div>
+
+              <!-- Pontualidade -->
+              <div class="text-center">
+                <div class="relative w-16 h-16">
+                  <svg viewBox="0 0 44 44" class="w-16 h-16 rotate-[-90deg]">
+                    <circle cx="22" cy="22" r="18" class="stroke-zinc-200 dark:stroke-zinc-700" stroke-width="4" fill="none" />
+                    <circle cx="22" cy="22" r="18" class="stroke-zinc-500 dark:stroke-zinc-300" stroke-width="4" fill="none"
+                      :stroke-dasharray="ringC" :stroke-dashoffset="dashOffset(punctualidadePct)" stroke-linecap="round" />
+                  </svg>
+                  <div class="absolute inset-0 flex items-center justify-center">
+                    <span class="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{{ punctualidadePct.toFixed(0) }}%</span>
+                  </div>
+                </div>
+                <div class="mt-1 text-[10px] text-zinc-600 dark:text-zinc-300">Pontualidade</div>
+              </div>
+
+              <!-- Avaliação -->
+              <div class="text-center">
+                <div class="relative w-16 h-16">
+                  <svg viewBox="0 0 44 44" class="w-16 h-16 rotate-[-90deg]">
+                    <circle cx="22" cy="22" r="18" class="stroke-zinc-200 dark:stroke-zinc-700" stroke-width="4" fill="none" />
+                    <circle cx="22" cy="22" r="18" class="stroke-zinc-500 dark:stroke-zinc-300" stroke-width="4" fill="none"
+                      :stroke-dasharray="ringC" :stroke-dashoffset="dashOffset(avaliacaoPct)" stroke-linecap="round" />
+                  </svg>
+                  <div class="absolute inset-0 flex items-center justify-center">
+                    <span class="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{{ avaliacaoPct.toFixed(0) }}%</span>
+                  </div>
+                </div>
+                <div class="mt-1 text-[10px] text-zinc-600 dark:text-zinc-300">Avaliação</div>
+              </div>
             </div>
           </div>
-          <div class="text-sm">
-            <div v-if="!documentosList.length" class="text-zinc-500">Nenhum documento enviado.</div>
-            <ul v-else class="divide-y divide-zinc-200 dark:divide-zinc-700">
-              <li v-for="d in documentosList" :key="String(d.id || d.label + d.url)" class="py-2 flex items-start justify-between gap-3">
-                <div class="min-w-0">
-                  <div class="font-medium flex items-center gap-2">
-                    <span>{{ d.label }}</span>
-                  </div>
-                  <div class="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-xs">
-                    <div class="text-zinc-500"><span class="mr-1">Envio:</span><span class="text-zinc-800 dark:text-zinc-200 font-medium">{{ formatDate(d.dataEnvio) }}</span></div>
-                    <div v-if="d.dataVencimento" class="text-zinc-500"><span class="mr-1">Validade:</span><span class="text-zinc-800 dark:text-zinc-200 font-medium">{{ formatDate(d.dataVencimento) }}</span></div>
-                    <div v-if="d.avaliacao != null" class="text-zinc-500">
-                      <span class="mr-1">Avaliação:</span>
-                      <span :class="['inline-flex items-center gap-1 px-1.5 py-0.5 rounded align-middle', statusToBadge(d.avaliacao)]">{{ String(d.avaliacao) }}</span>
+
+          <!-- Card: Documentos -->
+          <div class="card p-4 h-full">
+            <div class="flex items-center justify-between mb-2">
+              <div class="text-[11px] uppercase text-zinc-500">Documentos</div>
+              <div class="flex items-center gap-2">
+                <span v-if="docFlags.antecedentes" class="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700">Antecedentes vencidos</span>
+                <span v-if="docFlags.uniforme" class="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700">Uniforme vencido</span>
+              </div>
+            </div>
+            <div class="text-sm">
+              <div v-if="!documentosList.length" class="text-zinc-500">Nenhum documento enviado.</div>
+              <ul v-else class="divide-y divide-zinc-200 dark:divide-zinc-700">
+                <li v-for="d in documentosList" :key="String(d.id || d.label + d.url)" class="py-2 flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <div class="font-medium flex items-center gap-2">
+                      <span>{{ d.label }}</span>
                     </div>
-                    <div v-if="d.dataAvaliacao" class="text-zinc-500"><span class="mr-1">Avaliado em:</span><span class="text-zinc-800 dark:text-zinc-200 font-medium">{{ formatDate(d.dataAvaliacao) }}</span></div>
-                    <div v-if="d.motivoReprovacao" class="text-zinc-500"><span class="mr-1">Motivo:</span><span class="text-zinc-800 dark:text-zinc-200 font-medium">{{ d.motivoReprovacao }}</span></div>
+                    <div class="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-xs">
+                      <div class="text-zinc-500"><span class="mr-1">Envio:</span><span class="text-zinc-800 dark:text-zinc-200 font-medium">{{ formatDate(d.dataEnvio) }}</span></div>
+                      <div v-if="d.dataVencimento" class="text-zinc-500"><span class="mr-1">Validade:</span><span class="text-zinc-800 dark:text-zinc-200 font-medium">{{ formatDate(d.dataVencimento) }}</span></div>
+                      <div v-if="d.avaliacao != null" class="text-zinc-500">
+                        <span class="mr-1">Avaliação:</span>
+                        <span :class="['inline-flex items-center gap-1 px-1.5 py-0.5 rounded align-middle', statusToBadge(d.avaliacao)]">{{ String(d.avaliacao) }}</span>
+                      </div>
+                      <div v-if="d.dataAvaliacao" class="text-zinc-500"><span class="mr-1">Avaliado em:</span><span class="text-zinc-800 dark:text-zinc-200 font-medium">{{ formatDate(d.dataAvaliacao) }}</span></div>
+                      <div v-if="d.motivoReprovacao" class="text-zinc-500"><span class="mr-1">Motivo:</span><span class="text-zinc-800 dark:text-zinc-200 font-medium">{{ d.motivoReprovacao }}</span></div>
+                    </div>
                   </div>
+                  <div class="shrink-0 flex items-center gap-3">
+                    <button
+                      v-if="d.url"
+                      type="button"
+                      class="block h-10 w-10 rounded overflow-hidden ring-1 ring-zinc-300 cursor-zoom-in"
+                      @click="openImage(d.url)"
+                      title="Ampliar"
+                    >
+                      <img :src="d.url" alt="doc" class="h-full w-full object-cover" />
+                    </button>
+                  </div>
+                </li>
+              </ul>
+              <!-- Requisitos obrigatórios abaixo, seguindo padrão de divisão -->
+              <div
+                v-if="!requiredDocStatuses.fotoPerfil || !requiredDocStatuses.atestado || !requiredDocStatuses.antecedentes || !requiredDocStatuses.fotoUniforme"
+                class="mt-2 divide-y divide-zinc-200 dark:divide-zinc-700"
+              >
+                <div v-if="!requiredDocStatuses.fotoPerfil" class="py-2 flex items-center justify-between">
+                  <div class="font-medium">Foto de Perfil</div>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-800">Pendente</span>
                 </div>
-                <div class="shrink-0 flex items-center gap-3">
+                <div v-if="!requiredDocStatuses.atestado" class="py-2 flex items-center justify-between">
+                  <div class="font-medium">Atestado Médico</div>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-800">Pendente</span>
+                </div>
+                <div
+                  v-if="!requiredDocStatuses.antecedentes"
+                  class="py-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div class="min-w-0">
+                    <div class="font-medium">Antecedentes Criminais</div>
+                    <div
+                      v-if="antecedentesMessage"
+                      :class="['text-xs mt-1', antecedentesMessageClass]"
+                    >
+                      {{ antecedentesMessage }}
+                    </div>
+                    <div v-if="antecedentesLinks.length" class="mt-1 flex flex-wrap gap-2 text-xs">
+                      <a
+                        v-for="(link, idx) in antecedentesLinks"
+                        :key="link"
+                        :href="link"
+                        target="_blank"
+                        rel="noopener"
+                        class="text-blue-600 hover:underline"
+                      >
+                        Comprovante {{ idx + 1 }}
+                      </a>
+                    </div>
+                  </div>
                   <button
-                    v-if="d.url"
                     type="button"
-                    class="block h-10 w-10 rounded overflow-hidden ring-1 ring-zinc-300 cursor-zoom-in"
-                    @click="openImage(d.url)"
-                    title="Ampliar"
+                    class="inline-flex items-center justify-center px-3 py-1.5 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed"
+                    @click="consultarAntecedentes"
+                    :disabled="antecedentesLoading"
                   >
-                    <img :src="d.url" alt="doc" class="h-full w-full object-cover" />
+                    <span v-if="antecedentesLoading">Consultando…</span>
+                    <span v-else>Consultar</span>
                   </button>
                 </div>
-              </li>
-            </ul>
-            <!-- Requisitos obrigatórios abaixo, seguindo padrão de divisão -->
-            <div
-              v-if="!requiredDocStatuses.fotoPerfil || !requiredDocStatuses.atestado || !requiredDocStatuses.antecedentes || !requiredDocStatuses.fotoUniforme"
-              class="mt-2 divide-y divide-zinc-200 dark:divide-zinc-700"
-            >
-              <div v-if="!requiredDocStatuses.fotoPerfil" class="py-2 flex items-center justify-between">
-                <div class="font-medium">Foto de Perfil</div>
-                <span class="text-[10px] px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-800">Pendente</span>
-              </div>
-              <div v-if="!requiredDocStatuses.atestado" class="py-2 flex items-center justify-between">
-                <div class="font-medium">Atestado Médico</div>
-                <span class="text-[10px] px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-800">Pendente</span>
-              </div>
-              <div
-                v-if="!requiredDocStatuses.antecedentes"
-                class="py-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"
-              >
-                <div class="min-w-0">
-                  <div class="font-medium">Antecedentes Criminais</div>
-                  <div
-                    v-if="antecedentesMessage"
-                    :class="['text-xs mt-1', antecedentesMessageClass]"
-                  >
-                    {{ antecedentesMessage }}
-                  </div>
-                  <div v-if="antecedentesLinks.length" class="mt-1 flex flex-wrap gap-2 text-xs">
-                    <a
-                      v-for="(link, idx) in antecedentesLinks"
-                      :key="link"
-                      :href="link"
-                      target="_blank"
-                      rel="noopener"
-                      class="text-blue-600 hover:underline"
-                    >
-                      Comprovante {{ idx + 1 }}
-                    </a>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  class="inline-flex items-center justify-center px-3 py-1.5 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed"
-                  @click="consultarAntecedentes"
-                  :disabled="antecedentesLoading"
-                >
-                  <span v-if="antecedentesLoading">Consultando…</span>
-                  <span v-else>Consultar</span>
-                </button>
+                
               </div>
               
             </div>
-            
           </div>
         </div>
       </div>
 
       <!-- Financeiro (Aba) -->
-      <div v-else-if="activeTab==='financeiro'" class="grid grid-cols-1 gap-3">
+  <div v-if="activeTab==='financeiro'" class="grid grid-cols-1 gap-3">
         <div class="card p-4">
           <div class="text-[11px] uppercase text-zinc-500 mb-2">Financeiro</div>
           <div v-if="extrasLoading" class="text-sm text-zinc-500">Carregando…</div>
@@ -1131,43 +1767,532 @@ watch(idParam, load)
         </div>
       </div>
       <!-- Alertas -->
-      <div v-else-if="activeTab==='alertas'" class="card p-4">
-        <div class="text-[11px] uppercase text-zinc-500 mb-2">Alertas</div>
-        <div class="text-sm text-zinc-500">Sem alertas.</div>
+  <div v-if="activeTab==='alertas'" class="space-y-4">
+        <!-- Cabeçalho com Filtros -->
+        <div class="card p-4">
+          
+          <!-- Filtros e Limite -->
+          <div class="space-y-3">
+            <!-- Linha de Selects -->
+            <div class="flex flex-wrap items-end gap-3">
+              <!-- Filtro por Título -->
+              <div class="flex flex-col gap-1 w-64">
+                <label class="text-xs font-medium text-zinc-600 dark:text-zinc-400">Título:</label>
+                <select 
+                  v-model="avisosFiltro"
+                  class="px-3 py-2 text-sm border border-zinc-300 dark:border-zinc-600 rounded-lg bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="todos">Todos ({{ avisosContadores.todos }})</option>
+                  <option v-for="titulo in titulosUnicos" :key="titulo" :value="titulo">
+                    {{ titulo }} ({{ avisosContadores[titulo] || 0 }})
+                  </option>
+                </select>
+              </div>
+              
+              <!-- Filtro por Status -->
+              <div class="flex flex-col gap-1 w-64">
+                <label class="text-xs font-medium text-zinc-600 dark:text-zinc-400">Status:</label>
+                <select 
+                  v-model="avisosFiltroStatus"
+                  class="px-3 py-2 text-sm border border-zinc-300 dark:border-zinc-600 rounded-lg bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="todos">Todos ({{ avisosContadoresStatus.todos }})</option>
+                  <option v-for="status in statusUnicos" :key="status" :value="status">
+                    {{ status }} ({{ avisosContadoresStatus[status] || 0 }})
+                  </option>
+                </select>
+              </div>
+              
+              <!-- Seletor de Limite -->
+              <div class="flex flex-col gap-1 ml-auto">
+                <label class="text-xs font-medium text-zinc-600 dark:text-zinc-400">Limite:</label>
+                <select 
+                  v-model.number="avisosLimit" 
+                  @change="reloadAvisos"
+                  class="px-3 py-2 text-sm border border-zinc-300 dark:border-zinc-600 rounded-lg bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32"
+                >
+                  <option :value="20">20</option>
+                  <option :value="40">40</option>
+                  <option :value="60">60</option>
+                  <option :value="80">80</option>
+                  <option :value="100">100</option>
+                  <option :value="1000">1000</option>
+                </select>
+              </div>
+            </div>
+            
+            <!-- Chips de Filtros Ativos -->
+            <div v-if="avisosFiltro !== 'todos' || avisosFiltroStatus !== 'todos'" class="flex flex-wrap gap-2">
+              <span 
+                v-if="avisosFiltro !== 'todos'"
+                class="inline-flex items-center gap-1 px-2 py-1 bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 rounded text-xs border border-blue-300 dark:border-blue-700"
+              >
+                Título: {{ avisosFiltro }}
+                <button 
+                  @click="avisosFiltro = 'todos'"
+                  class="hover:bg-blue-200 dark:hover:bg-blue-800 rounded px-1"
+                >×</button>
+              </span>
+              
+              <span 
+                v-if="avisosFiltroStatus !== 'todos'"
+                class="inline-flex items-center gap-1 px-2 py-1 bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400 rounded text-xs border border-purple-300 dark:border-purple-700"
+              >
+                Status: {{ avisosFiltroStatus }}
+                <button 
+                  @click="avisosFiltroStatus = 'todos'"
+                  class="hover:bg-purple-200 dark:hover:bg-purple-800 rounded px-1"
+                >×</button>
+              </span>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Loading -->
+        <div v-if="avisosLoading" class="card p-8">
+          <div class="flex items-center justify-center">
+            <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+          </div>
+        </div>
+        
+        <!-- Grid de Avisos (3 por linha) -->
+        <div v-else-if="avisosFiltrados.length > 0" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div 
+            v-for="aviso in avisosFiltrados" 
+            :key="aviso.id" 
+            class="card p-4 rounded-lg border-l-4 transition-shadow hover:shadow-md"
+            :class="{
+              'border-l-yellow-500 bg-yellow-50/50 dark:bg-yellow-900/10': aviso.titulo === 'ATENÇÃO!' || aviso.titulo === 'Atenção',
+              'border-l-blue-500 bg-blue-50/50 dark:bg-blue-900/10': aviso.titulo === 'NOVO EVENTO' || aviso.titulo === 'Novo evento',
+              'border-l-gray-500 bg-gray-50/50 dark:bg-gray-800/50': aviso.status === 'removido',
+              'border-l-zinc-400 bg-zinc-50/50 dark:bg-zinc-800/50': aviso.titulo !== 'ATENÇÃO!' && aviso.titulo !== 'Atenção' && aviso.titulo !== 'NOVO EVENTO' && aviso.titulo !== 'Novo evento' && aviso.status !== 'removido'
+            }"
+          >
+            <!-- Cabeçalho: Ícone + Título -->
+            <div class="flex items-start gap-2 mb-2">
+              <div class="flex items-start gap-2 min-w-0 flex-1">
+                <svg v-if="aviso.status === 'removido'" class="w-5 h-5 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+                <svg v-else-if="aviso.titulo === 'ATENÇÃO!' || aviso.titulo === 'Atenção'" class="w-5 h-5 text-yellow-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <svg v-else-if="aviso.titulo === 'NOVO EVENTO' || aviso.titulo === 'Novo evento'" class="w-5 h-5 text-blue-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <svg v-else class="w-5 h-5 text-zinc-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                
+                <!-- Título -->
+                <h3 class="font-semibold text-sm line-clamp-2 min-w-0" :class="{
+                  'text-gray-900 dark:text-gray-400': aviso.status === 'removido',
+                  'text-yellow-900 dark:text-yellow-400': aviso.status !== 'removido' && (aviso.titulo === 'ATENÇÃO!' || aviso.titulo === 'Atenção'),
+                  'text-blue-900 dark:text-blue-400': aviso.status !== 'removido' && (aviso.titulo === 'NOVO EVENTO' || aviso.titulo === 'Novo evento'),
+                  'text-zinc-900 dark:text-zinc-300': aviso.status !== 'removido' && aviso.titulo !== 'ATENÇÃO!' && aviso.titulo !== 'Atenção' && aviso.titulo !== 'NOVO EVENTO' && aviso.titulo !== 'Novo evento'
+                }">
+                  {{ aviso.titulo }}
+                </h3>
+              </div>
+              
+              <!-- Badge de Status -->
+              <span v-if="aviso.status" class="text-xs px-2 py-0.5 rounded-full flex-shrink-0" :class="{
+                'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400': aviso.status === 'erro',
+                'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400': aviso.status === 'alerta',
+                'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400': aviso.status === 'info',
+                'bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400': aviso.status === 'interagir',
+                'bg-zinc-100 text-zinc-800 dark:bg-zinc-900/30 dark:text-zinc-400': aviso.status === 'pendente',
+                'bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400': aviso.status === 'removido'
+              }">
+                {{ aviso.status }}
+              </span>
+            </div>
+            
+            <!-- Mensagem Principal -->
+            <p class="text-xs text-zinc-700 dark:text-zinc-300 mb-2 line-clamp-3">
+              {{ aviso.msg1 }}
+            </p>
+            
+            <!-- Mensagem Secundária (se existir) -->
+            <p v-if="aviso.msg2" class="text-xs text-zinc-600 dark:text-zinc-400 mb-2 line-clamp-2">
+              {{ aviso.msg2 }}
+            </p>
+            
+            <!-- Rodapé -->
+            <div class="mt-auto pt-2 border-t border-zinc-200 dark:border-zinc-700">
+              <div class="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
+                <span v-if="aviso.user_create" class="inline-flex items-center gap-1 truncate">
+                  <svg class="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                  </svg>
+                  {{ aviso.user_create }}
+                </span>
+                <span v-if="aviso.data_create" class="truncate">
+                  {{ new Date(aviso.data_create).toLocaleString('pt-BR', { 
+                    day: '2-digit', 
+                    month: '2-digit', 
+                    year: 'numeric',
+                    hour: '2-digit', 
+                    minute: '2-digit' 
+                  }) }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Vazio -->
+        <div v-else class="card p-8">
+          <div class="text-center text-sm text-zinc-500">
+            <svg class="w-12 h-12 mx-auto mb-2 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
+            </svg>
+            {{ avisosFiltro === 'todos' ? 'Sem alertas' : `Nenhum alerta do tipo "${avisosFiltro}"` }}
+          </div>
+        </div>
       </div>
 
       <!-- Ofertas -->
-      <div v-else-if="activeTab==='ofertas'" class="card p-4">
+  <div v-if="activeTab==='ofertas'" class="card p-4">
         <div class="text-[11px] uppercase text-zinc-500 mb-2">Ofertas</div>
         <div class="text-sm text-zinc-500">Sem ofertas.</div>
       </div>
 
       <!-- Agenda -->
-      <div v-else-if="activeTab==='agenda'" class="card p-4">
+  <div v-if="activeTab==='agenda'" class="card p-4">
         <div class="text-[11px] uppercase text-zinc-500 mb-2">Agenda</div>
         <div class="text-sm text-zinc-500">Sem itens de agenda.</div>
       </div>
 
-      <!-- Presenças -->
-      <div v-else-if="activeTab==='presencas'" class="card p-4">
-        <div class="text-[11px] uppercase text-zinc-500 mb-2">Histórico de Presenças</div>
-        <div v-if="extrasLoading" class="text-sm text-zinc-500">Carregando…</div>
-        <div v-else-if="!checkins.length" class="text-sm text-zinc-500">Sem registros.</div>
-        <ul v-else class="divide-y divide-zinc-200 dark:divide-zinc-700 text-sm">
-          <li v-for="(c,i) in checkins" :key="'c'+i" class="py-2 flex items-center justify-between">
-            <div class="min-w-0">
-              <div class="font-medium truncate">{{ c.evento || c.event || c.nome || 'Evento' }}</div>
-              <div class="text-xs text-zinc-500">Check-in: {{ formatDate(c.checkin || c.inicio) }} • Check-out: {{ formatDate(c.checkout || c.fim) }}</div>
-            </div>
-            <div class="shrink-0 text-xs text-zinc-500">{{ c.status || '-' }}</div>
-          </li>
-        </ul>
-      </div>
+  <!-- Presenças -->
+  <div v-if="activeTab==='presencas'">
 
-      <!-- Observações (somente na aba Perfil) -->
-      <div v-if="activeTab==='perfil'" class="card p-4">
-        <div class="text-[11px] uppercase text-zinc-500 mb-2">Observações</div>
-        <div class="text-sm whitespace-pre-wrap">{{ form.observacoes || form.obs || '-' }}</div>
+        <!-- Cards de resumo: Total de Horas + Histórico do Cooperado -->
+        <div v-if="escalasFiltradas.length > 0" class="mb-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <!-- Card: Total de Horas Trabalhadas -->
+          <div class="bg-gradient-to-r from-zinc-50 to-zinc-100 dark:from-zinc-800/30 dark:to-zinc-800/10 border border-zinc-200 dark:border-zinc-700 rounded-lg p-4">
+            <div class="flex items-center gap-3 mb-3">
+              <svg class="w-5 h-5 text-zinc-700 dark:text-zinc-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+              <h3 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Total de Horas Trabalhadas</h3>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div class="bg-white dark:bg-zinc-800 rounded-lg p-3 border border-zinc-200 dark:border-zinc-700">
+                <div class="text-xs text-zinc-600 dark:text-zinc-400 mb-1">Horas Normais</div>
+                <div class="text-lg font-bold text-zinc-900 dark:text-zinc-100">
+                  {{ escalasTotaisHoras.geral > 0 ? escalasTotaisHoras.normais.toFixed(1) : '0.0' }}h
+                </div>
+              </div>
+              <div class="bg-white dark:bg-zinc-800 rounded-lg p-3 border border-zinc-200 dark:border-zinc-700">
+                <div class="text-xs text-zinc-600 dark:text-zinc-400 mb-1">Horas Extras</div>
+                <div class="text-lg font-bold text-zinc-900 dark:text-zinc-100">
+                  {{ escalasTotaisHoras.extras > 0 ? escalasTotaisHoras.extras.toFixed(1) : '0.0' }}h
+                </div>
+              </div>
+              <div class="bg-white dark:bg-zinc-800 rounded-lg p-3 border border-zinc-200 dark:border-zinc-700">
+                <div class="text-xs text-zinc-600 dark:text-zinc-400 mb-1">Horas Noturnas</div>
+                <div class="text-lg font-bold text-zinc-900 dark:text-zinc-100">
+                  {{ escalasTotaisHoras.noturnas > 0 ? escalasTotaisHoras.noturnas.toFixed(1) : '0.0' }}h
+                </div>
+              </div>
+              <div class="bg-white dark:bg-zinc-800 rounded-lg p-3 border border-zinc-200 dark:border-zinc-700">
+                <div class="text-xs text-zinc-600 dark:text-zinc-400 mb-1">Total Geral</div>
+                <div class="text-lg font-bold text-zinc-900 dark:text-zinc-100">
+                  {{ escalasTotaisHoras.geral.toFixed(1) }}h
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card: Histórico do Cooperado -->
+          <div class="bg-gradient-to-r from-zinc-50 to-zinc-100 dark:from-zinc-800/30 dark:to-zinc-800/10 border border-zinc-200 dark:border-zinc-700 rounded-lg p-4">
+            <div class="flex items-center gap-3 mb-3">
+              <svg class="w-5 h-5 text-zinc-700 dark:text-zinc-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7h18M3 12h18M3 17h18"/>
+              </svg>
+              <h3 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Histórico do Cooperado</h3>
+            </div>
+            <!-- Grid com 4 cards de métricas -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <!-- Pontualidade -->
+              <div class="bg-white dark:bg-zinc-800 rounded-lg p-3 border border-zinc-200 dark:border-zinc-700">
+                <div class="text-xs text-zinc-600 dark:text-zinc-400 mb-1">Pontualidade</div>
+                <div class="text-2xl font-bold text-zinc-900 dark:text-zinc-100">{{ punctualidadePct.toFixed(0) }}%</div>
+              </div>
+              <!-- Presença -->
+              <div class="bg-white dark:bg-zinc-800 rounded-lg p-3 border border-zinc-200 dark:border-zinc-700">
+                <div class="text-xs text-zinc-600 dark:text-zinc-400 mb-1">Presença</div>
+                <div class="text-2xl font-bold text-zinc-900 dark:text-zinc-100">{{ presencaPct.toFixed(0) }}%</div>
+              </div>
+              <!-- Check-out -->
+              <div class="bg-white dark:bg-zinc-800 rounded-lg p-3 border border-zinc-200 dark:border-zinc-700">
+                <div class="text-xs text-zinc-600 dark:text-zinc-400 mb-1">Check-out</div>
+                <div class="text-2xl font-bold text-zinc-900 dark:text-zinc-100">{{ checkOutPct.toFixed(0) }}%</div>
+              </div>
+              <!-- Avaliação -->
+              <div class="bg-white dark:bg-zinc-800 rounded-lg p-3 border border-zinc-200 dark:border-zinc-700">
+                <div class="text-xs text-zinc-600 dark:text-zinc-400 mb-1">Avaliação</div>
+                <div class="text-2xl font-bold text-zinc-900 dark:text-zinc-100">{{ avaliacaoPct.toFixed(0) }}%</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- Filtros -->
+        <div v-if="escalas.length > 0" class="mb-4 space-y-3 card p-4">
+          <div class="flex flex-wrap items-center gap-2">
+            <!-- Filtro por Cliente -->
+            <div class="flex items-center gap-2">
+              <label class="text-xs text-zinc-600 dark:text-zinc-400 font-medium">Cliente:</label>
+              <select v-model="escalasFiltroCliente" class="text-xs px-3 py-1.5 border border-zinc-300 dark:border-zinc-600 rounded bg-white dark:bg-zinc-800 w-48">
+                <option value="todos">Todos ({{ escalasContadoresCliente.todos }})</option>
+                <option v-for="cliente in escalasClientesUnicos" :key="cliente.id" :value="cliente.id">
+                  {{ cliente.nome }} ({{ escalasContadoresCliente[cliente.id] || 0 }})
+                </option>
+              </select>
+            </div>
+
+            <!-- Filtro por Status -->
+            <div class="flex items-center gap-2">
+              <label class="text-xs text-zinc-600 dark:text-zinc-400 font-medium">Status:</label>
+              <select v-model="escalasFiltroStatus" class="text-xs px-3 py-1.5 border border-zinc-300 dark:border-zinc-600 rounded bg-white dark:bg-zinc-800 w-48">
+                <option value="todos">Todos ({{ escalasContadoresStatus.todos }})</option>
+                <option v-for="status in escalasStatusUnicos" :key="status" :value="status">
+                  {{ status }} ({{ escalasContadoresStatus[status] || 0 }})
+                </option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Chips de Filtros Ativos -->
+          <div v-if="escalasFiltroCliente !== 'todos' || escalasFiltroStatus !== 'todos'" class="flex flex-wrap gap-2">
+            <span v-if="escalasFiltroCliente !== 'todos'" class="inline-flex items-center gap-1 px-2 py-1 bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 rounded text-xs border border-blue-300 dark:border-blue-700">
+              Cliente: {{ escalasClientesUnicos.find(c => c.id === escalasFiltroCliente)?.nome || escalasFiltroCliente }}
+              <button @click="escalasFiltroCliente = 'todos'" class="hover:bg-blue-200 dark:hover:bg-blue-800 rounded px-1">×</button>
+            </span>
+            <span v-if="escalasFiltroStatus !== 'todos'" class="inline-flex items-center gap-1 px-2 py-1 bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400 rounded text-xs border border-purple-300 dark:border-purple-700">
+              Status: {{ escalasFiltroStatus }}
+              <button @click="escalasFiltroStatus = 'todos'" class="hover:bg-purple-200 dark:hover:bg-purple-800 rounded px-1">×</button>
+            </span>
+          </div>
+
+          <!-- Contador de Resultados -->
+          <!-- <div class="text-xs text-zinc-500 dark:text-zinc-400">
+            Mostrando {{ escalasFiltradas.length }} de {{ escalas.length }} escalas
+          </div> -->
+        </div>
+
+        
+
+        <div v-if="escalasLoading" class="text-sm text-zinc-500">Carregando…</div>
+        <div v-else-if="!escalas.length" class="text-sm text-zinc-500">Sem escalas registradas.</div>
+        <div v-else>
+          <div v-if="escalasFiltradas.length === 0" class="text-sm text-zinc-500">Nenhuma escala encontrada com os filtros selecionados.</div>
+          <div v-else class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            <div v-for="(escala,i) in escalasFiltradas" :key="'e'+i">
+              <div class="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-t-lg overflow-hidden shadow-sm hover:shadow-md transition-shadow">
+                <!-- Header colorido com evento e data -->
+                <div :class="[
+                  'px-4 py-3 border-b',
+                  escala.status === 'confirmado' ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800' :
+                escala.status === 'sem vaga' ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800' :
+                escala.status === 'recusado' ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800' :
+                escala.status === 'lido' ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800' :
+                'bg-zinc-50 dark:bg-zinc-800 border-zinc-200 dark:border-zinc-700'
+              ]">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="flex-1 min-w-0">
+                    <h3 class="font-semibold text-sm text-zinc-900 dark:text-zinc-100 mb-1 line-clamp-2">
+                      {{ escala.evento?.nome_evento || 'Evento sem nome' }}
+                    </h3>
+                    <p class="text-xs text-zinc-600 dark:text-zinc-400">
+                      {{ escala.evento?.data_evento_view || formatDate(escala.evento?.data_evento) }}
+                    </p>
+                  </div>
+                  <span :class="[
+                    'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold uppercase tracking-wide shrink-0',
+                    escala.status === 'confirmado' ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300' :
+                    escala.status === 'removido' ? 'bg-zinc-200 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300' :
+                    escala.status === 'sem vaga' ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' :
+                    escala.status === 'recusado' ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' :
+                    escala.status === 'lido' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' :
+                    'bg-zinc-200 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300'
+                  ]">
+                    <svg v-if="escala.status === 'confirmado'" class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                      <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                    </svg>
+                    <svg v-else-if="escala.status === 'removido'" class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                      <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/>
+                    </svg>
+                    <svg v-else-if="escala.status === 'recusado' || escala.status === 'sem vaga'" class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                      <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+                    </svg>
+                    {{ escala.status || 'indefinido' }}
+                  </span>
+                </div>
+              </div>
+
+              <!-- Corpo do card -->
+              <div class="p-4 space-y-3">
+                <!-- Função -->
+                <div v-if="escala.funcao" class="flex items-center gap-2">
+                  <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
+                    <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                      <path fill-rule="evenodd" d="M6 6V5a3 3 0 013-3h2a3 3 0 013 3v1h2a2 2 0 012 2v3.57A22.952 22.952 0 0110 13a22.95 22.95 0 01-8-1.43V8a2 2 0 012-2h2zm2-1a1 1 0 011-1h2a1 1 0 011 1v1H8V5zm1 5a1 1 0 011-1h.01a1 1 0 110 2H10a1 1 0 01-1-1z" clip-rule="evenodd"/>
+                      <path d="M2 13.692V16a2 2 0 002 2h12a2 2 0 002-2v-2.308A24.974 24.974 0 0110 15c-2.796 0-5.487-.46-8-1.308z"/>
+                    </svg>
+                    {{ escala.funcao.profissao }}
+                  </span>
+                  <!-- CBO ocultado conforme solicitação -->
+                </div>
+                
+                <!-- Valores -->
+                <div class="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-3">
+                  <div class="flex items-center justify-between gap-4 text-xs">
+                    <div class="flex items-center gap-2">
+                      <span class="text-zinc-600 dark:text-zinc-400">Valor Base</span>
+                      <span v-if="escala.valor" class="font-semibold text-zinc-900 dark:text-zinc-100">R$ {{ Number(escala.valor).toFixed(2) }}</span>
+                      <span v-else class="text-xs px-2 py-0.5 rounded bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-400">Não informado</span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <span class="text-zinc-600 dark:text-zinc-400">Valor Final</span>
+                      <span v-if="escala.valor_final && escala.valor_final !== escala.valor" class="font-semibold text-green-600 dark:text-green-400">R$ {{ Number(escala.valor_final).toFixed(2) }}</span>
+                      <span v-else class="text-xs px-2 py-0.5 rounded bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-400">—</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Horários -->
+                <div class="grid grid-cols-2 gap-3 text-xs">
+                  <div class="flex items-start gap-2">
+                    <svg class="w-4 h-4 text-zinc-400 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"/>
+                    </svg>
+                    <div class="flex-1 min-w-0">
+                      <div class="font-medium text-zinc-700 dark:text-zinc-300 mb-1 flex items-center gap-2">
+                        Check-in
+                        <span v-if="escala.check_in && escala.check_in_real"
+                          :class="{
+                            'text-red-700 font-semibold': compareTimes(escala.check_in_real, escala.check_in) === 'late',
+                            'text-green-700 font-semibold': compareTimes(escala.check_in_real, escala.check_in) === 'ontime',
+                            'text-blue-700 font-semibold': compareTimes(escala.check_in_real, escala.check_in) === 'early'
+                          }">
+                          <span v-if="compareTimes(escala.check_in_real, escala.check_in) === 'late'">Atrasado</span>
+                          <span v-else-if="compareTimes(escala.check_in_real, escala.check_in) === 'ontime'">Pontual</span>
+                          <span v-else-if="compareTimes(escala.check_in_real, escala.check_in) === 'early'">Adiantado</span>
+                        </span>
+                      </div>
+                      <div v-if="escala.check_in" class="text-zinc-600 dark:text-zinc-400">
+                        <span class="text-zinc-500 dark:text-zinc-500">Previsto:</span> {{ formatDateTime(escala.check_in) }}
+                      </div>
+                      <div v-else class="text-xs px-2 py-0.5 rounded bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-400">Não registrado</div>
+                      <div v-if="escala.check_in_real" class="flex items-center gap-1 mt-1">
+                        <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                          <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                        </svg>
+                        <span :class="{
+                          'text-red-700 font-semibold': compareTimes(escala.check_in_real, escala.check_in) === 'late',
+                          'text-green-700 font-semibold': compareTimes(escala.check_in_real, escala.check_in) === 'ontime',
+                          'text-blue-700 font-semibold': compareTimes(escala.check_in_real, escala.check_in) === 'early'
+                        }">
+                          Real: {{ formatDateTime(escala.check_in_real) }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="flex items-start gap-2">
+                    <svg class="w-4 h-4 text-zinc-400 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+                    </svg>
+                    <div class="flex-1 min-w-0">
+                      <div class="font-medium text-zinc-700 dark:text-zinc-300 mb-1 flex items-center gap-2">
+                        Check-out
+                        <span v-if="escala.check_out && escala.check_out_real"
+                          :class="{
+                            'text-red-700 font-semibold': compareTimes(escala.check_out_real, escala.check_out) === 'early',
+                            'text-green-700 font-semibold': compareTimes(escala.check_out_real, escala.check_out) === 'ontime',
+                            'text-blue-700 font-semibold': compareTimes(escala.check_out_real, escala.check_out) === 'late'
+                          }">
+                            <span v-if="compareTimes(escala.check_out_real, escala.check_out) === 'early'">Atrasado</span>
+                            <span v-else-if="compareTimes(escala.check_out_real, escala.check_out) === 'ontime'">Pontual</span>
+                            <span v-else-if="compareTimes(escala.check_out_real, escala.check_out) === 'late'">Adiantado</span>
+                        </span>
+                      </div>
+                      <div v-if="escala.check_out" class="text-zinc-600 dark:text-zinc-400">
+                        <span class="text-zinc-500 dark:text-zinc-500">Previsto:</span> {{ formatDateTime(escala.check_out) }}
+                      </div>
+                      <div v-else class="text-xs px-2 py-0.5 rounded bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-400">Não registrado</div>
+                      <div v-if="escala.check_out_real" class="flex items-center gap-1 mt-1">
+                        <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                          <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                        </svg>
+                        <span :class="{
+                          'text-red-700 font-semibold': compareTimes(escala.check_out_real, escala.check_out) === 'early',
+                          'text-green-700 font-semibold': compareTimes(escala.check_out_real, escala.check_out) === 'ontime',
+                          'text-blue-700 font-semibold': compareTimes(escala.check_out_real, escala.check_out) === 'late'
+                        }">
+                          Real: {{ formatDateTime(escala.check_out_real) }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Horas trabalhadas -->
+                <div class="pt-3 border-t border-zinc-200 dark:border-zinc-700">
+                  <div class="text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-2">Horas Trabalhadas</div>
+                  <div v-if="escala.horas_normais || escala.horas_extras || escala.horas_noturnas" class="grid grid-cols-2 gap-2 text-xs">
+                    <div v-if="escala.horas_normais && Number(escala.horas_normais) > 0" class="flex items-center gap-1.5">
+                      <div class="w-2 h-2 rounded-full bg-blue-500"></div>
+                      <span class="text-zinc-600 dark:text-zinc-400">{{ (Number(escala.horas_normais) / 60).toFixed(1) }}h</span>
+                    </div>
+                    <div v-if="escala.horas_extras && Number(escala.horas_extras) > 0" class="flex items-center gap-1.5">
+                      <div class="w-2 h-2 rounded-full bg-orange-500"></div>
+                      <span class="text-zinc-600 dark:text-zinc-400">{{ (Number(escala.horas_extras) / 60).toFixed(1) }}h extra</span>
+                    </div>
+                    <div v-if="escala.horas_noturnas && Number(escala.horas_noturnas) > 0" class="flex items-center gap-1.5">
+                      <div class="w-2 h-2 rounded-full bg-purple-500"></div>
+                      <span class="text-zinc-600 dark:text-zinc-400">{{ (Number(escala.horas_noturnas) / 60).toFixed(1) }}h not.</span>
+                    </div>
+                  </div>
+                  <div v-else class="text-xs px-2 py-1 rounded bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-400 inline-block">
+                    Sem horas registradas
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Footer com informações extras (fora do card) -->
+            <div class="bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-700 border-t-0 rounded-b-lg px-4 py-2 text-xs flex items-center justify-between gap-3 -mt-px">
+              <div class="flex-1 text-zinc-600 dark:text-zinc-400 space-y-2">
+                <div v-if="escala.status_motivo" class="flex items-start gap-2">
+                  <svg class="w-4 h-4 text-zinc-400 shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/>
+                  </svg>
+                  <span>{{ escala.status_motivo }}</span>
+                </div>
+                <div v-if="escala.confirmado_ida_evento" class="flex items-center gap-1.5 text-green-600 dark:text-green-400">
+                  <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                  </svg>
+                  <span>Presença confirmada</span>
+                </div>
+                <div v-else class="text-xs px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 inline-block">
+                  Presença não confirmada
+                </div>
+              </div>
+              
+              <!-- Avaliação no lado direito -->
+              <div v-if="escala.avaliacao" class="flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-zinc-900 rounded-md border border-zinc-200 dark:border-zinc-700">
+                <svg class="w-4 h-4 text-yellow-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/>
+                </svg>
+                <span class="font-semibold text-zinc-700 dark:text-zinc-300">{{ escala.avaliacao }}</span>
+                <span v-if="escala.avaliacao_motivo" class="text-zinc-500 dark:text-zinc-400">({{ escala.avaliacao_motivo }})</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Debug (visível quando ?debug=1 na URL) -->

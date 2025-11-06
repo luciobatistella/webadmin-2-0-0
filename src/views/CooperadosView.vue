@@ -381,18 +381,6 @@ function buildApiParams(opts?: { includeDocFilters?: boolean; forStatistics?: bo
   if (sexoFilter.value === 'M' || sexoFilter.value === 'F') {
     p.append('sexo', String(sexoFilter.value))
   }
-  // Para estatísticas, alguns backends aceitam sexom/sexof para filtragem
-  if (opts?.forStatistics) {
-    if (!sexoFilter.value) {
-      // quando não há filtro de sexo, incluímos ambos (se suportado)
-      p.append('sexom', 'true')
-      p.append('sexof', 'true')
-    } else if (sexoFilter.value === 'M') {
-      p.append('sexom', 'true')
-    } else if (sexoFilter.value === 'F') {
-      p.append('sexof', 'true')
-    }
-  }
   // Abas de situação -> status oficial (1=Ativo,2=Inativo,3=Bloqueado,4=Pendente). Para "Todos" omite ou 0.
   const st = mapStatusTabToApi()
   // Só envia status para o backend quando for um valor específico (>0). Para "Todos", não enviar.
@@ -413,12 +401,6 @@ function buildApiParams(opts?: { includeDocFilters?: boolean; forStatistics?: bo
     if (vencUniforme.value) p.append('uniformeVencimento', 'true')
   }
   // NÃO enviar orderBy: ordenamos no cliente
-  // Filtros de localização (alguns backends aceitam em estatísticas)
-  if (opts?.forStatistics) {
-    if (estadoFilter.value) p.append('uf', String(estadoFilter.value))
-    if (cidadeFilter.value) p.append('cidade', String(cidadeFilter.value))
-    if (regiaoFilter.value) p.append('regiao', String(regiaoFilter.value))
-  }
   return p
 }
 
@@ -2098,6 +2080,11 @@ watch([q, sexoFilter, estadoFilter, cidadeFilter, statusFilter, opStatusFilter, 
 })
 
 function onCreate() {
+  // Ao incluir cadastro, zera qualquer rascunho salvo para iniciar do zero
+  try {
+    localStorage.removeItem('draft:cooperado-form')
+    localStorage.removeItem('draft:cooperado-funcoes')
+  } catch {}
   router.push({ name: 'cooperado-new' })
 }
 
