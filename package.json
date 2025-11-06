@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "type-check": "vue-tsc --noEmit",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "vite build",
+    "build:check": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
