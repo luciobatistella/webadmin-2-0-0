@@ -99,3 +99,38 @@ Se nenhuma variável de ambiente estiver definida, o sistema usa `public/config.
   "version": "2.0.0"
 }
 ```
+
+## Deploy
+
+### Vercel
+
+O projeto inclui um arquivo `vercel.json` que:
+- Redireciona todas as rotas para `/index.html` (necessário para SPA com Vue Router)
+- Configura cache otimizado para assets estáticos
+
+**Nenhuma configuração adicional necessária!** Apenas conecte seu repositório no Vercel.
+
+### Netlify
+
+O projeto inclui um arquivo `public/_redirects` para suporte a Netlify.
+
+### Outros Hosts
+
+Se usar outro provedor de hospedagem estática, configure o servidor para:
+1. Redirecionar todas as rotas para `index.html` (fallback para client-side routing)
+2. Servir arquivos estáticos com cache adequado
+
+Exemplos:
+- **Apache**: use `.htaccess` com `RewriteRule`
+- **Nginx**: configure `try_files $uri $uri/ /index.html;`
+- **Firebase Hosting**: configure `rewrites` no `firebase.json`
+
+## Problemas Conhecidos
+
+### "Incluir cooperado" não funciona em produção
+**Causa:** Ordem incorreta das rotas no Vue Router. Rotas com `:id` capturavam "new" como ID.
+**Solução:** As rotas `/new` agora vêm ANTES das rotas `/:id` no router.
+
+### Erro 404 ao acessar URLs diretamente
+**Causa:** Servidor não está redirecionando rotas para index.html.
+**Solução:** Use `vercel.json` (Vercel) ou `public/_redirects` (Netlify) já incluídos no projeto.

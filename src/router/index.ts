@@ -12,19 +12,23 @@ const routes: RouteRecordRaw[] = [
     children: [
       { path: '/dashboard', name: 'dashboard', component: () => import('../views/DashboardHomeView.vue'), meta: { title: 'Dashboard' } },
       { path: '/clients', name: 'clients', component: () => import('../views/ClientsView.vue'), meta: { title: 'Clientes' } },
-      { path: '/clients/:id', name: 'client-detail', component: () => import('../components/clients/ClientDetailPage.vue'), meta: { title: 'Detalhe do Cliente' } },
+      // Rotas /new devem vir ANTES das rotas /:id
       { path: '/clients/new', name: 'client-new', component: () => import('../components/clients/ClientDetailPage.vue'), meta: { title: 'Novo Cliente' } },
+      { path: '/clients/:id', name: 'client-detail', component: () => import('../components/clients/ClientDetailPage.vue'), meta: { title: 'Detalhe do Cliente' } },
       { path: '/users', name: 'users', component: () => import('../views/UsersView.vue'), meta: { title: 'Usuários' } },
+      // Rotas específicas antes de rotas dinâmicas
       { path: '/users/register', name: 'user-register', component: () => import('../views/UserFormView.vue'), meta: { title: 'Novo usuário' } },
       { path: '/users/edit/:id', name: 'user-edit', component: () => import('../views/UserFormView.vue'), meta: { title: 'Editar usuário' } },
       { path: '/requests', name: 'requests', component: () => import('../views/RequestsView.vue'), meta: { title: 'Solicitações' } },
       { path: '/settings', name: 'settings', component: () => import('../views/SettingsView.vue'), meta: { title: 'Configurações' } },
       { path: '/cooperados', name: 'cooperados', component: () => import('../views/CooperadosView.vue'), meta: { title: 'Cooperados', keepAlive: true } },
-  { path: '/cooperados/new', name: 'cooperado-new', component: CooperadoCreatePage, meta: { title: 'Novo Cooperado' } },
-  { path: '/cooperados/:id', name: 'cooperado-detail', component: () => import('../components/cooperados/CooperadoDetailPage.vue'), meta: { title: 'Detalhe do Cooperado' } },
-  { path: '/cooperados/:id/edit', name: 'cooperado-edit', component: () => import('../components/cooperados/CooperadoEditPage.vue'), meta: { title: 'Editar Cooperado' } },
+      // Rotas /new devem vir ANTES das rotas /:id para evitar que "new" seja interpretado como ID
+      { path: '/cooperados/new', name: 'cooperado-new', component: CooperadoCreatePage, meta: { title: 'Novo Cooperado' } },
+      { path: '/cooperados/:id', name: 'cooperado-detail', component: () => import('../components/cooperados/CooperadoDetailPage.vue'), meta: { title: 'Detalhe do Cooperado' } },
+      { path: '/cooperados/:id/edit', name: 'cooperado-edit', component: () => import('../components/cooperados/CooperadoEditPage.vue'), meta: { title: 'Editar Cooperado' } },
       { path: '/billing', name: 'billing', component: () => import('../views/BillingView.vue'), meta: { title: 'Faturamento', keepAlive: true } },
       { path: '/solicitacoes', name: 'solicitacoes', component: () => import('../views/EventView.vue'), meta: { title: 'Solicitações', keepAlive: true } },
+      // Rota /new também antes de rotas dinâmicas
       { path: '/solicitacoes/new', name: 'request-new', component: () => import('../components/requests/SolicitationCreatePage.vue'), meta: { title: 'Nova Solicitação' } },
     ],
   },
