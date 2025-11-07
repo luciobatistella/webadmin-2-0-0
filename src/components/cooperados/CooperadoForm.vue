@@ -37,6 +37,7 @@ const fieldCards = ref<Record<string, boolean>>({
   telefone2: false,
   numero: false,
   complemento: false,
+  chavePix: false,
   banco: false,
   agencia: false,
   conta: false,
@@ -45,7 +46,7 @@ const fieldCards = ref<Record<string, boolean>>({
 // Card de endereço (agrupa todos os campos bloqueados do CEP)
 const enderecoCard = ref(false)
 
-// Estado de verificação de telefone via WhatsApp
+// Estado de verificação de telefone via SMS
 const phoneVerify = ref({
   code: '' as string,
   expiresAt: 0 as number, // epoch ms
@@ -53,12 +54,18 @@ const phoneVerify = ref({
   verified: false as boolean,
   error: '' as string,
   national: '' as string,
+  sending: false as boolean,
 })
 
-// Número oficial de WhatsApp (config) em E.164 (ex: 5511999999999)
-const officialWhatsappE164 = ref<string | null>(null)
-// Último link gerado (fallback manual se popup for bloqueado)
-const lastWhatsappUrl = ref<string>('')
+// Estado de verificação de email
+const emailVerify = ref({
+  code: '' as string,
+  expiresAt: 0 as number,
+  lastSentAt: 0 as number,
+  verified: false as boolean,
+  error: '' as string,
+  sending: false as boolean,
+})
 
 // Funções (atividades) - máximo 6 selecionadas
 const funcoesSearch = ref('')
@@ -397,6 +404,7 @@ const form = ref<FormData>({
   situacaoCooperativa: 4, // Pré-Cadastro por padrão
   cooperativa: '',
   tipoPagto: '',
+  chavePix: '',
   banco: '',
   agencia: '',
   conta: '',
@@ -431,27 +439,11 @@ onMounted(() => {
         } catch {}
       } else {
         // Mode create: zera verificação
-        phoneVerify.value = { code: '', expiresAt: 0, lastSentAt: 0, verified: false, error: '', national: '' }
+        phoneVerify.value = { code: '', expiresAt: 0, lastSentAt: 0, verified: false, error: '', national: '', sending: false }
         try { localStorage.removeItem('draft:telefone1-verify') } catch {}
       }
     }
   } catch {}
-  // Carregar número oficial do WhatsApp a partir do config público
-  ;(async () => {
-    try {
-      const cfg = await loadPublicConfig()
-      let n = String(cfg?.official_whatsapp_number || '').trim()
-      if (n) {
-        n = n.replace(/^\+/, '')
-        const digits = n.replace(/\D/g, '')
-        // Aceita com ou sem 55; se não tiver DDI, assume Brasil
-        const withDdi = digits.startsWith('55') ? digits : `55${digits}`
-        if (withDdi.length >= 12 && withDdi.length <= 13) {
-          officialWhatsappE164.value = withDdi
-        }
-      }
-    } catch {}
-  })()
 })
 
 watch(form, (v) => {
@@ -553,8 +545,10 @@ function canResendCode(): boolean {
   return now - (phoneVerify.value.lastSentAt || 0) > 60_000 // 60s cooldown
 }
 
-function startWhatsappVerification() {
+async function startSMSVerification() {
   errors.value.telefone1 = ''
+  phoneVerify.value.error = ''
+  
   const { e164, national } = normalizeBRPhoneToE164(form.value.telefone1)
   if (!e164) {
     errors.value.telefone1 = 'Telefone inválido. Informe DDD + número (10-11 dígitos).'
@@ -564,34 +558,44 @@ function startWhatsappVerification() {
     phoneVerify.value.error = 'Aguarde 60s para reenviar o código.'
     return
   }
+  
   // Gerar código 6 dígitos e expirar em 5 min
   const code = Math.floor(100000 + Math.random() * 900000).toString()
   phoneVerify.value.code = code
   phoneVerify.value.expiresAt = Date.now() + 5 * 60_000
   phoneVerify.value.lastSentAt = Date.now()
   phoneVerify.value.verified = false
-  phoneVerify.value.error = ''
-  try { localStorage.setItem('draft:telefone1-verify', JSON.stringify(phoneVerify.value)) } catch {}
-  // Montar link do WhatsApp
-  const text = encodeURIComponent(`Código de verificação: ${code}. Telefone: ${formatBRPhone(national)}. Expira em 5 minutos.`)
-  // Para OTP, precisamos enviar ao próprio número do usuário. Sem API do WhatsApp, usamos o click-to-chat para o número do usuário.
-  const targetNumber = e164
-  const url = `https://wa.me/${targetNumber}?text=${text}`
   phoneVerify.value.national = national
-  lastWhatsappUrl.value = url
-  const win = window.open(url, '_blank')
-  if (!win) {
-    ;(window as any).$toast?.info?.('Não foi possível abrir o WhatsApp automaticamente. Copiamos o código para sua área de transferência.')
-    try { navigator.clipboard.writeText(code) } catch {}
+  phoneVerify.value.sending = true
+  
+  try { localStorage.setItem('draft:telefone1-verify', JSON.stringify(phoneVerify.value)) } catch {}
+  
+  // Importar serviço SMS dinamicamente para evitar erro se não configurado
+  try {
+    const { sendVerificationSMS } = await import('@/services/sms')
+    const result = await sendVerificationSMS({ phone: e164, code })
+    
+    if (result.success) {
+      ;(window as any).$toast?.success?.('Código enviado por SMS! Verifique seu celular.')
+    } else {
+      phoneVerify.value.error = result.error || 'Erro ao enviar SMS. Tente novamente.'
+      ;(window as any).$toast?.error?.(phoneVerify.value.error)
+    }
+  } catch (error: any) {
+    console.error('[SMS] Erro ao enviar código:', error)
+    phoneVerify.value.error = error?.message || 'Erro ao enviar SMS. Verifique sua conexão.'
+    ;(window as any).$toast?.error?.(phoneVerify.value.error)
+  } finally {
+    phoneVerify.value.sending = false
   }
 }
 
-function confirmWhatsappCode(inputCode: string) {
+function confirmSMSCode(inputCode: string) {
   const code = String(inputCode || '').trim()
-  if (!code) { phoneVerify.value.error = 'Informe o código recebido.'; return }
+  if (!code) { phoneVerify.value.error = 'Informe o código recebido por SMS.'; return }
   if (!phoneVerify.value.code) { phoneVerify.value.error = 'Nenhum código foi gerado ainda.'; return }
   if (Date.now() > phoneVerify.value.expiresAt) {
-    phoneVerify.value.error = 'Código expirado. Reenvie pelo WhatsApp.'
+    phoneVerify.value.error = 'Código expirado. Solicite um novo código.'
     return
   }
   if (code !== phoneVerify.value.code) {
@@ -600,7 +604,75 @@ function confirmWhatsappCode(inputCode: string) {
   }
   phoneVerify.value.verified = true
   phoneVerify.value.error = ''
+  fieldCards.value.telefone1 = true
   ;(window as any).$toast?.success?.('Telefone verificado com sucesso!')
+}
+
+function canResendEmailCode(): boolean {
+  const now = Date.now()
+  return now - (emailVerify.value.lastSentAt || 0) > 60_000 // 60s cooldown
+}
+
+async function startEmailVerification() {
+  errors.value.email = ''
+  emailVerify.value.error = ''
+  
+  const email = String(form.value.email || '').trim()
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    errors.value.email = 'E-mail inválido.'
+    return
+  }
+  if (!canResendEmailCode()) {
+    emailVerify.value.error = 'Aguarde 60s para reenviar o código.'
+    return
+  }
+  
+  // Gerar código 6 dígitos e expirar em 5 min
+  const code = Math.floor(100000 + Math.random() * 900000).toString()
+  emailVerify.value.code = code
+  emailVerify.value.expiresAt = Date.now() + 5 * 60_000
+  emailVerify.value.lastSentAt = Date.now()
+  emailVerify.value.verified = false
+  emailVerify.value.sending = true
+  
+  try { localStorage.setItem('draft:email-verify', JSON.stringify(emailVerify.value)) } catch {}
+  
+  // Importar serviço de email dinamicamente
+  try {
+    const { sendVerificationEmail } = await import('@/services/email')
+    const result = await sendVerificationEmail({ email, code })
+    
+    if (result.success) {
+      ;(window as any).$toast?.success?.('Código enviado por e-mail! Verifique sua caixa de entrada.')
+    } else {
+      emailVerify.value.error = result.error || 'Erro ao enviar e-mail. Tente novamente.'
+      ;(window as any).$toast?.error?.(emailVerify.value.error)
+    }
+  } catch (error: any) {
+    console.error('[Email] Erro ao enviar código:', error)
+    emailVerify.value.error = error?.message || 'Erro ao enviar e-mail. Verifique sua conexão.'
+    ;(window as any).$toast?.error?.(emailVerify.value.error)
+  } finally {
+    emailVerify.value.sending = false
+  }
+}
+
+function confirmEmailCode(inputCode: string) {
+  const code = String(inputCode || '').trim()
+  if (!code) { emailVerify.value.error = 'Informe o código recebido por e-mail.'; return }
+  if (!emailVerify.value.code) { emailVerify.value.error = 'Nenhum código foi gerado ainda.'; return }
+  if (Date.now() > emailVerify.value.expiresAt) {
+    emailVerify.value.error = 'Código expirado. Solicite um novo código.'
+    return
+  }
+  if (code !== emailVerify.value.code) {
+    emailVerify.value.error = 'Código incorreto.'
+    return
+  }
+  emailVerify.value.verified = true
+  emailVerify.value.error = ''
+  fieldCards.value.email = true
+  ;(window as any).$toast?.success?.('E-mail verificado com sucesso!')
 }
 
 function validateField(field: string) {
@@ -664,7 +736,12 @@ function validateForm(): boolean {
   // Exigir verificação do telefone 1
   if (!phoneVerify.value.verified) {
     isValid = false
-    errors.value.telefone1 = 'Telefone precisa ser verificado via WhatsApp'
+    errors.value.telefone1 = 'Telefone precisa ser verificado'
+  }
+  // Exigir verificação do email
+  if (!emailVerify.value.verified) {
+    isValid = false
+    errors.value.email = 'E-mail precisa ser verificado'
   }
   
   return isValid
@@ -964,7 +1041,7 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
 </script>
 
 <template>
-  <form ref="rootForm" @submit.prevent="handleSave" class="space-y-6">
+  <form ref="rootForm" @submit.prevent="handleSave" class="space-y-6" autocomplete="off">
     <!-- Linha 1: Informações Pessoais + Situação Cooperativa -->
     <div class="grid grid-cols-1 lg:grid-cols-[60%_40%] gap-6">
       <!-- Informações Pessoais -->
@@ -984,6 +1061,7 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
                 v-model="form.nome"
                 name="nome"
                 type="text"
+                autocomplete="off"
                 class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700"
                 :class="{ 'border-red-500': errors.nome }"
                 @blur="validateField('nome')"
@@ -1263,30 +1341,178 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
             <!-- Separador -->
             <div class="col-span-full border-t border-zinc-200 dark:border-zinc-700 my-2"></div>
             
-            <!-- E-mail -->
-            <div>
+            <!-- E-mail com verificação -->
+            <div class="col-span-1">
               <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">E-mail</label>
+              
+              <!-- Card do Email quando verificado -->
+              <div v-if="emailVerify.verified && fieldCards.email" class="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg">
+                <svg class="w-5 h-5 text-green-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <div class="flex-1 min-w-0">
+                  <div class="font-medium text-green-900 truncate">{{ form.email }}</div>
+                  <div class="text-xs text-green-600">Verificado</div>
+                </div>
+              </div>
+              
+              <!-- Input quando não verificado - TUDO EM UMA LINHA -->
+              <div v-else class="flex items-center gap-2">
+                <input
+                  v-model="form.email"
+                  name="email"
+                  type="email"
+                  placeholder="email@exemplo.com"
+                  class="flex-1 px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700"
+                  :class="{ 'border-red-500': errors.email }"
+                  @blur="validateField('email')"
+                  @keydown.enter.prevent="handleFieldEnter('email')"
+                  @keydown.tab="handleFieldTab('email')"
+                />
+                
+                <!-- Botão verificar -->
+                <button 
+                  v-if="!emailVerify.code || (emailVerify.code && Date.now() > emailVerify.expiresAt)"
+                  type="button" 
+                  @click="startEmailVerification" 
+                  class="rounded-full bg-[#0B61F3] px-3 h-7 text-sm font-semibold text-white shadow-sm hover:bg-blue-600 disabled:opacity-50 flex items-center gap-1.5 whitespace-nowrap" 
+                  :disabled="!form.email || emailVerify.sending"
+                >
+                  <svg v-if="emailVerify.sending" class="animate-spin h-3.5 w-3.5" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <span>{{ emailVerify.sending ? 'Enviando...' : 'Verificar' }}</span>
+                </button>
+                
+                <!-- Input de código (verifica ao digitar 6 números ou ao dar blur/enter/tab) -->
+                <input 
+                  v-if="emailVerify.code && !emailVerify.verified && Date.now() <= emailVerify.expiresAt"
+                  v-model="(emailVerify as any).inputCode" 
+                  type="text" 
+                  inputmode="numeric" 
+                  maxlength="6" 
+                  placeholder="000000" 
+                  class="w-28 px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700 text-center tracking-wider font-mono" 
+                  @input="(e: any) => { if (e.target.value.length === 6) confirmEmailCode(e.target.value) }"
+                  @keydown.enter.prevent="confirmEmailCode((emailVerify as any).inputCode || '')"
+                  @blur="() => { if ((emailVerify as any).inputCode?.length === 6) confirmEmailCode((emailVerify as any).inputCode) }"
+                />
+                
+                <!-- Timer -->
+                <span v-if="emailVerify.code && !emailVerify.verified && Date.now() <= emailVerify.expiresAt" class="text-sm text-zinc-500 whitespace-nowrap">
+                  {{ Math.max(0, Math.ceil((emailVerify.expiresAt - Date.now())/1000)) }}s
+                </span>
+              </div>
+              
+              <p v-if="emailVerify.error" class="mt-1 text-xs text-red-500">{{ emailVerify.error }}</p>
+              <p v-if="errors.email" class="mt-1 text-xs text-red-500">{{ errors.email }}</p>
+            </div>
+
+            <!-- Telefone 1 com verificação -->
+            <div class="col-span-1">
+              <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                Telefone 1 <span class="text-red-500">*</span>
+                <button 
+                  v-if="!showTelefone2"
+                  type="button" 
+                  class="ml-2 inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-100 text-blue-600 hover:bg-blue-200 transition-colors" 
+                  @click="showTelefone2 = true" 
+                  title="Adicionar telefone 2"
+                >
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v12m6-6H6"/>
+                  </svg>
+                </button>
+              </label>
+              
+              <!-- Card do Telefone quando verificado -->
+              <div v-if="phoneVerify.verified && fieldCards.telefone1" class="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg">
+                <svg class="w-5 h-5 text-green-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <div class="flex-1 min-w-0">
+                  <div class="font-medium text-green-900">{{ form.telefone1 }}</div>
+                  <div class="text-xs text-green-600">Verificado</div>
+                </div>
+              </div>
+              
+              <!-- Input quando não verificado -->
+              <div v-else class="flex items-center gap-2">
+                <input
+                  v-model="form.telefone1"
+                  name="telefone1"
+                  type="tel"
+                  placeholder="(11) 98888-8888"
+                  class="flex-1 px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700"
+                  :class="{ 'border-red-500': errors.telefone1 }"
+                  @blur="validateField('telefone1')"
+                  @keydown.enter.prevent="handleFieldEnter('telefone1')"
+                  @keydown.tab="handleFieldTab('telefone1')"
+                />
+                
+                <!-- Botão verificar -->
+                <button 
+                  v-if="!phoneVerify.code || (phoneVerify.code && Date.now() > phoneVerify.expiresAt)"
+                  type="button" 
+                  @click="startSMSVerification" 
+                  class="rounded-full bg-[#0B61F3] px-3 h-7 text-sm font-semibold text-white shadow-sm hover:bg-blue-600 disabled:opacity-50 flex items-center gap-1.5 whitespace-nowrap" 
+                  :disabled="!form.telefone1 || phoneVerify.sending"
+                >
+                  <svg v-if="phoneVerify.sending" class="animate-spin h-3.5 w-3.5" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <span>{{ phoneVerify.sending ? 'Enviando...' : 'Verificar' }}</span>
+                </button>
+                
+                <!-- Input de código (verifica ao digitar 6 números ou ao dar blur/enter/tab) -->
+                <input 
+                  v-if="phoneVerify.code && !phoneVerify.verified && Date.now() <= phoneVerify.expiresAt"
+                  v-model="(phoneVerify as any).inputCode" 
+                  type="text" 
+                  inputmode="numeric" 
+                  maxlength="6" 
+                  placeholder="000000" 
+                  class="w-28 px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700 text-center tracking-wider font-mono" 
+                  @input="(e: any) => { if (e.target.value.length === 6) confirmSMSCode(e.target.value) }"
+                  @keydown.enter.prevent="confirmSMSCode((phoneVerify as any).inputCode || '')"
+                  @blur="() => { if ((phoneVerify as any).inputCode?.length === 6) confirmSMSCode((phoneVerify as any).inputCode) }"
+                />
+                
+                <!-- Timer -->
+                <span v-if="phoneVerify.code && !phoneVerify.verified && Date.now() <= phoneVerify.expiresAt" class="text-sm text-zinc-500 whitespace-nowrap">
+                  {{ Math.max(0, Math.ceil((phoneVerify.expiresAt - Date.now())/1000)) }}s
+                </span>
+              </div>
+              
+              <p v-if="phoneVerify.error" class="mt-1 text-xs text-red-500">{{ phoneVerify.error }}</p>
+              <p v-if="errors.telefone1" class="mt-1 text-xs text-red-500">{{ errors.telefone1 }}</p>
+            </div>
+
+            <!-- Telefone 2 (opcional) -->
+            <div v-if="showTelefone2">
+              <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">Telefone 2 (opcional)</label>
               <input
-                v-if="!fieldCards.email"
-                v-model="form.email"
-                name="email"
-                type="email"
+                v-if="!fieldCards.telefone2"
+                v-model="form.telefone2"
+                name="telefone2"
+                type="tel"
+                placeholder="(11) 3333-3333"
                 class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700"
-                :class="{ 'border-red-500': errors.email }"
-                @blur="validateField('email')"
-                @keydown.enter.prevent="handleFieldEnter('email')"
-                @keydown.tab="handleFieldTab('email')"
+                @keydown.enter.prevent="handleFieldEnter('telefone2')"
+                @keydown.tab="handleFieldTab('telefone2')"
               />
-              <!-- Card do Email -->
+              <!-- Card do Telefone 2 -->
               <div v-else class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
                 <div class="flex-1 min-w-0">
-                  <div class="font-medium text-blue-900 truncate">{{ form.email }}</div>
+                  <div class="font-medium text-blue-900">{{ form.telefone2 }}</div>
                 </div>
                 <button
                   type="button"
-                  @click="removerCard('email')"
+                  @click="removerCard('telefone2')"
                   class="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-100 flex-shrink-0"
-                  title="Editar e-mail"
+                  title="Editar telefone 2"
                   tabindex="-1"
                 >
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1294,105 +1520,13 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
                   </svg>
                 </button>
               </div>
-              <p v-if="errors.email" class="mt-1 text-xs text-red-500">{{ errors.email }}</p>
-            </div>
-
-            <!-- Telefone 1 e Ações/Telefone 2 na mesma linha -->
-            <div class="grid grid-cols-2 gap-4">
-              <!-- Telefone 1 -->
-              <div>
-                <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-                  Telefone 1 <span class="text-red-500">*</span>
-                </label>
-                <input
-                  v-if="!fieldCards.telefone1"
-                  v-model="form.telefone1"
-                  name="telefone1"
-                  type="tel"
-                  placeholder="(11) 98888-8888"
-                  class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700"
-                  :class="{ 'border-red-500': errors.telefone1 }"
-                  @blur="validateField('telefone1')"
-                  @keydown.enter.prevent="handleFieldEnter('telefone1')"
-                  @keydown.tab="handleFieldTab('telefone1')"
-                />
-                <!-- Card do Telefone 1 -->
-                <div v-else class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                  <div class="flex-1 min-w-0">
-                    <div class="font-medium text-blue-900">{{ form.telefone1 }}</div>
-                  </div>
-                  <button
-                    type="button"
-                    @click="removerCard('telefone1')"
-                    class="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-100 flex-shrink-0"
-                    title="Editar telefone"
-                    tabindex="-1"
-                  >
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </div>
-                <p v-if="errors.telefone1" class="mt-1 text-xs text-red-500">{{ errors.telefone1 }}</p>
-              </div>
-
-              <!-- Coluna direita: Ações WhatsApp ou Telefone 2 ao clicar em + -->
-              <div>
-                <!-- Ações de verificação WhatsApp (padrão) -->
-                <div v-if="!showTelefone2" class="mt-6 flex flex-wrap items-center gap-2">
-                  <button type="button" @click="startWhatsappVerification" class="text-xs px-3 py-1.5 rounded border border-green-600 text-green-700 hover:bg-green-50 disabled:opacity-50" :disabled="!form.telefone1 || !canResendCode()">
-                    Verificar
-                  </button>
-                  <a v-if="lastWhatsappUrl" :href="lastWhatsappUrl" target="_blank" rel="noopener" class="text-xs text-blue-600 hover:underline">Abrir</a>
-                  <button type="button" class="ml-auto inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-zinc-300 hover:bg-zinc-50 dark:border-zinc-700" @click="showTelefone2 = true" title="Adicionar telefone 2">
-                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v12m6-6H6"/></svg>
-                    Add Tel. 2
-                  </button>
-                  <div v-if="phoneVerify.code && !phoneVerify.verified" class="w-full flex items-center gap-2 mt-2">
-                    <input v-model="(phoneVerify as any).inputCode" type="text" inputmode="numeric" maxlength="6" placeholder="Código" class="w-24 px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700" />
-                    <button type="button" @click="confirmWhatsappCode((phoneVerify as any).inputCode || '')" class="px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700 text-xs">
-                      Confirmar
-                    </button>
-                    <span class="text-xs text-zinc-500">{{ Math.max(0, Math.ceil((phoneVerify.expiresAt - Date.now())/1000)) }}s</span>
-                  </div>
-                  <p v-if="phoneVerify.error" class="mt-1 text-xs text-red-500 w-full">{{ phoneVerify.error }}</p>
-                </div>
-                <!-- Telefone 2 (revelado pelo +) -->
-                <div v-else>
-                  <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">Telefone 2</label>
-                  <div>
-                    <input
-                      v-if="!fieldCards.telefone2"
-                      v-model="form.telefone2"
-                      name="telefone2"
-                      type="tel"
-                      placeholder="(11) 3333-3333"
-                      class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700"
-                      @keydown.enter.prevent="handleFieldEnter('telefone2')"
-                      @keydown.tab="handleFieldTab('telefone2')"
-                    />
-                    <!-- Card do Telefone 2 -->
-                    <div v-else class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                      <div class="flex-1 min-w-0">
-                        <div class="font-medium text-blue-900">{{ form.telefone2 }}</div>
-                      </div>
-                      <button
-                        type="button"
-                        @click="removerCard('telefone2')"
-                        class="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-100 flex-shrink-0"
-                        title="Editar telefone 2"
-                        tabindex="-1"
-                      >
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
-                    </div>
-                    <div class="mt-2">
-                      <button type="button" class="text-xs text-zinc-600 hover:underline" @click="showTelefone2 = false">Ocultar telefone 2</button>
-                    </div>
-                  </div>
-                </div>
+              <div class="mt-1">
+                <button type="button" class="text-xs text-zinc-600 hover:text-zinc-800 hover:underline" @click="showTelefone2 = false">
+                  <svg class="w-3 h-3 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                  Remover telefone 2
+                </button>
               </div>
             </div>
           </div>
@@ -1400,12 +1534,12 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
       </section>
 
       <!-- Coluna 2: Funções e Endereço -->
-      <div class="space-y-6">
+      <div class="grid grid-rows-2 gap-6 h-full">
         <!-- Funções -->
-        <section class="card p-4">
+        <section class="card p-4 flex flex-col">
           <h3 class="text-[11px] uppercase text-zinc-500 mb-2">Funções (máx. 6)</h3>
           
-          <div class="space-y-3">
+          <div class="space-y-3 flex-1">
             <!-- Busca de Funções -->
             <div class="relative">
               <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">
@@ -1496,56 +1630,53 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
         </section>
 
         <!-- Endereço -->
-        <section class="card p-4">
+        <section class="card p-4 flex flex-col">
           <h3 class="text-[11px] uppercase text-zinc-500 mb-2">Endereço</h3>
         
-        <div class="grid grid-cols-1 gap-4">
-          <!-- CEP com ícone de busca -->
-          <div class="grid grid-cols-[200px_1fr] gap-4">
-            <div>
-              <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">CEP</label>
-              <div v-if="!fieldCards.cep" class="relative">
-                <input
-                  ref="cepInput"
-                  v-model="form.cep"
-                  name="cep"
-                  type="text"
-                  maxlength="9"
-                  placeholder="00000-000"
-                  class="w-full px-3 py-2 pr-10 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700"
-                  @blur="buscarCep"
-                  @keydown.enter.prevent="handleFieldEnter('cep')"
-                  @keydown.tab="handleFieldTab('cep')"
-                />
-                <button
-                  type="button"
-                  @click="buscarCep"
-                  class="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 hover:bg-zinc-100 rounded-md transition-colors"
-                >
-                  <svg class="w-4 h-4 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-                  </svg>
-                </button>
-              </div>
-              <!-- Card do CEP -->
-              <div v-else class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                <div class="flex-1 min-w-0">
-                  <div class="font-medium text-blue-900">{{ form.cep }}</div>
-                </div>
-                <button
-                  type="button"
-                  @click="removerCard('cep')"
-                  class="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-100 flex-shrink-0"
-                  title="Editar CEP"
-                  tabindex="-1"
-                >
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
+          <div class="grid grid-cols-1 gap-4 flex-1">
+          <!-- CEP -->
+          <div>
+            <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">CEP</label>
+            <div v-if="!fieldCards.cep" class="relative max-w-[200px]">
+              <input
+                ref="cepInput"
+                v-model="form.cep"
+                name="cep"
+                type="text"
+                maxlength="9"
+                placeholder="00000-000"
+                class="w-full px-3 py-2 pr-10 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700"
+                @blur="buscarCep"
+                @keydown.enter.prevent="handleFieldEnter('cep')"
+                @keydown.tab="handleFieldTab('cep')"
+              />
+              <button
+                type="button"
+                @click="buscarCep"
+                class="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 hover:bg-zinc-100 rounded-md transition-colors"
+              >
+                <svg class="w-4 h-4 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                </svg>
+              </button>
             </div>
-            <div></div>
+            <!-- Card do CEP -->
+            <div v-else class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg max-w-[200px]">
+              <div class="flex-1 min-w-0">
+                <div class="font-medium text-blue-900">{{ form.cep }}</div>
+              </div>
+              <button
+                type="button"
+                @click="removerCard('cep')"
+                class="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-100 flex-shrink-0"
+                title="Editar CEP"
+                tabindex="-1"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
           </div>
 
           <!-- Card consolidado do endereço (após buscar CEP) -->
@@ -2063,8 +2194,8 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
               Tipo de Pagamento
             </label>
             
-            <!-- Quando não selecionado, mostra as três opções -->
-            <div v-if="!form.tipoPagto" class="grid grid-cols-3 gap-2 mt-2">
+            <!-- Quando não selecionado, mostra as opções -->
+            <div v-if="!form.tipoPagto" class="grid grid-cols-2 gap-2 mt-2">
               <button
                 type="button"
                 @click="form.tipoPagto = 'PIX'"
@@ -2087,16 +2218,6 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
                 </svg>
                 <span class="text-sm font-medium">TED</span>
               </button>
-              <button
-                type="button"
-                @click="form.tipoPagto = 'Dinheiro'"
-                class="flex items-center justify-center gap-1.5 px-2 py-2 border rounded-lg transition-colors border-zinc-300 bg-white text-zinc-700 hover:border-blue-400 hover:bg-blue-50 dark:bg-zinc-800 dark:border-zinc-700 dark:hover:border-blue-500 dark:hover:bg-blue-900/20"
-              >
-                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm.31-8.86c-1.77-.45-2.34-.94-2.34-1.67 0-.84.79-1.43 2.1-1.43 1.38 0 1.9.66 1.94 1.64h1.71c-.05-1.34-.87-2.57-2.49-2.97V5H10.9v1.69c-1.51.32-2.72 1.3-2.72 2.81 0 1.79 1.49 2.69 3.66 3.21 1.95.46 2.34 1.15 2.34 1.87 0 .53-.39 1.39-2.1 1.39-1.6 0-2.23-.72-2.32-1.64H8.04c.1 1.7 1.36 2.66 2.86 2.97V19h2.34v-1.67c1.52-.29 2.72-1.16 2.73-2.77-.01-2.2-1.9-2.96-3.66-3.42z"/>
-                </svg>
-                <span class="text-sm font-medium">Dinheiro</span>
-              </button>
             </div>
             
             <!-- Selecionado: vira um "chip" com botão de fechar para trocar -->
@@ -2106,11 +2227,8 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
                 <path fill="#4db6ac" d="M36.1,36h0.68l-8.04,8.04c-2.62,2.61-6.86,2.61-9.48,0L11.22,36h0.68c1.6,0,3.11-0.62,4.24-1.76l6.8-6.77c0.59-0.59,1.53-0.59,2.12,0l6.8,6.77C32.99,35.38,34.5,36,36.1,36z"/>
                 <path fill="#4db6ac" d="M44.04,28.74L38.78,34H36.1c-1.07,0-2.07-0.42-2.83-1.17l-6.8-6.78c-1.36-1.36-3.58-1.36-4.94,0l-6.8,6.78C13.97,33.58,12.97,34,11.9,34H9.22l-5.26-5.26c-2.61-2.62-2.61-6.86,0-9.48L9.22,14h2.68c1.07,0,2.07,0.42,2.83,1.17l6.8,6.78c0.68,0.68,1.58,1.02,2.47,1.02s1.79-0.34,2.47-1.02l6.8-6.78C34.03,14.42,35.03,14,36.1,14h2.68l5.26,5.26C46.65,21.88,46.65,26.12,44.04,28.74z"/>
               </svg>
-              <svg v-else-if="form.tipoPagto === 'TED'" class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M11 8c0 2.21-1.79 4-4 4s-4-1.79-4-4 1.79-4 4-4 4 1.79 4 4zm0 6.72V20H0v-2c0-2.21 3.13-4 7-4 1.5 0 2.87.27 4 .72zM24 20H13V3h11v17zM16 8.43c0 .52-.43.95-.95.95h-4.1c-.52 0-.95-.43-.95-.95v-4.1c0-.52.43-.95.95-.95h4.1c.52 0 .95.43.95.95v4.1z"/>
-              </svg>
               <svg v-else class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm.31-8.86c-1.77-.45-2.34-.94-2.34-1.67 0-.84.79-1.43 2.1-1.43 1.38 0 1.9.66 1.94 1.64h1.71c-.05-1.34-.87-2.57-2.49-2.97V5H10.9v1.69c-1.51.32-2.72 1.3-2.72 2.81 0 1.79 1.49 2.69 3.66 3.21 1.95.46 2.34 1.15 2.34 1.87 0 .53-.39 1.39-2.1 1.39-1.6 0-2.23-.72-2.32-1.64H8.04c.1 1.7 1.36 2.66 2.86 2.97V19h2.34v-1.67c1.52-.29 2.72-1.16 2.73-2.77-.01-2.2-1.9-2.96-3.66-3.42z"/>
+                <path d="M11 8c0 2.21-1.79 4-4 4s-4-1.79-4-4 1.79-4 4-4 4 1.79 4 4zm0 6.72V20H0v-2c0-2.21 3.13-4 7-4 1.5 0 2.87.27 4 .72zM24 20H13V3h11v17zM16 8.43c0 .52-.43.95-.95.95h-4.1c-.52 0-.95-.43-.95-.95v-4.1c0-.52.43-.95.95-.95h4.1c.52 0 .95.43.95.95v4.1z"/>
               </svg>
               <span>{{ form.tipoPagto }}</span>
               <button
@@ -2126,8 +2244,40 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
             </div>
           </div>
 
-          <!-- Banco -->
-          <div>
+          <!-- Chave PIX (apenas quando PIX selecionado) -->
+          <div v-if="form.tipoPagto === 'PIX'">
+            <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">Chave PIX</label>
+            <input
+              v-if="!fieldCards.chavePix"
+              v-model="form.chavePix"
+              name="chavePix"
+              type="text"
+              placeholder="Digite a chave PIX..."
+              class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700"
+              @keydown.enter.prevent="handleFieldEnter('chavePix')"
+              @keydown.tab="handleFieldTab('chavePix')"
+            />
+            <!-- Card da Chave PIX -->
+            <div v-else class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+              <div class="flex-1 min-w-0">
+                <div class="font-medium text-blue-900 truncate">{{ form.chavePix }}</div>
+              </div>
+              <button
+                type="button"
+                @click="removerCard('chavePix')"
+                class="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-100 flex-shrink-0"
+                title="Editar chave PIX"
+                tabindex="-1"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- Banco (apenas quando TED selecionado) -->
+          <div v-if="form.tipoPagto === 'TED'">
             <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">Banco</label>
             
             <div v-if="!fieldCards.banco" class="relative">
@@ -2182,7 +2332,8 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
             </div>
           </div>
 
-          <div class="grid grid-cols-3 gap-4">
+          <!-- Agência e Conta (apenas quando TED selecionado) -->
+          <div v-if="form.tipoPagto === 'TED'" class="grid grid-cols-3 gap-4">
             <!-- Agência -->
             <div>
               <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">Agência</label>

@@ -1,6 +1,4 @@
 {
   "api_url": "https://testapi.eventossp.app.br/",
-  "version": "2.0.0",
-  "official_whatsapp_number": "" 
+  "version": "2.0.0"
 }
-
