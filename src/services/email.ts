@@ -1,7 +1,7 @@
 /**
  * Serviço de envio de Email para verificação
  * 
- * Integração com endpoint do backend /webadmin/email
+ * Integração com endpoint do backend /webadmin/sendmail
  */
 
 import { createApi } from './api'
@@ -38,7 +38,7 @@ export async function sendVerificationEmail(params: SendEmailParams): Promise<Se
     const api = await getApi()
     const cfg = await loadPublicConfig()
     console.log('🌐 API Base URL:', cfg.api_url)
-    console.log('📡 Endpoint completo:', `${cfg.api_url}/webadmin/email`)
+    console.log('📡 Endpoint completo:', `${cfg.api_url}/webadmin/sendmail`)
     
     const payload = {
       email: params.email,
@@ -47,7 +47,7 @@ export async function sendVerificationEmail(params: SendEmailParams): Promise<Se
     }
     console.log('📦 Payload enviado:', JSON.stringify(payload, null, 2))
     
-    const response = await api.post('/webadmin/email', payload)
+    const response = await api.post('/webadmin/sendmail', payload)
     
     console.log('✅ Resposta recebida:')
     console.log('  - Status:', response.status)
