@@ -473,8 +473,10 @@ const requiredFields = computed(() => ({
   dataNasc: 'Data de nascimento é obrigatória',
   sexo: 'Sexo é obrigatório',
   telefone1: 'Pelo menos um telefone é obrigatório',
+  cep: 'CEP é obrigatório',
   cidade: 'Cidade é obrigatória',
   uf: 'UF é obrigatória',
+  numero: 'Número é obrigatório'
 }))
 
 // Utilitários de validação
@@ -748,6 +750,7 @@ function validateForm(): boolean {
 }
 
 function handleSave() {
+  console.log('[handleSave]');
   if (!validateForm()) {
     const firstError = Object.keys(errors.value)[0]
     const errorEl = document.querySelector(`[name="${firstError}"]`) as HTMLElement
@@ -1030,7 +1033,12 @@ function getFieldLabel(field: string): string {
 // Expor método de submit programático para o botão externo
 const rootForm = ref<HTMLFormElement | null>(null)
 function requestSubmit() {
-  try { rootForm.value?.requestSubmit() } catch { /* noop */ }
+  console.log('[requestSubmit]');
+  try { 
+    rootForm.value?.requestSubmit();
+  } catch(err) { /* noop */ 
+    console.log('[requestSubmit][error]', err);
+  }
 }
 
 function clearDraft() {
@@ -1636,7 +1644,7 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
           <div class="grid grid-cols-1 gap-4 flex-1">
           <!-- CEP -->
           <div>
-            <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">CEP</label>
+            <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">CEP <span class="text-red-500">*</span></label>
             <div v-if="!fieldCards.cep" class="relative max-w-[200px]">
               <input
                 ref="cepInput"
@@ -1646,6 +1654,7 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
                 maxlength="9"
                 placeholder="00000-000"
                 class="w-full px-3 py-2 pr-10 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700"
+                :class="{ 'border-red-500': errors.cep }"
                 @blur="buscarCep"
                 @keydown.enter.prevent="handleFieldEnter('cep')"
                 @keydown.tab="handleFieldTab('cep')"
@@ -1677,11 +1686,12 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
                 </svg>
               </button>
             </div>
+            <p v-if="errors.cep" class="mt-1 text-xs text-red-500">{{ errors.cep }}</p>
           </div>
 
           <!-- Card consolidado do endereço (após buscar CEP) -->
           <div v-if="enderecoCard">
-            <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">Endereço Completo</label>
+            <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">Endereço Completo <span class="text-red-500">*</span></label>
             <div class="flex items-start gap-2 p-4 bg-blue-50 border border-blue-200 rounded-lg">
               <div class="flex-1 min-w-0">
                 <div class="font-medium text-blue-900 flex flex-wrap items-center gap-2">
@@ -1709,7 +1719,7 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
           <div class="grid grid-cols-[1fr_2fr] gap-4">
             <!-- Número -->
             <div>
-              <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">Número</label>
+              <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">Número <span class="text-red-500">*</span></label>
               <input
                 v-if="!fieldCards.numero"
                 ref="numeroInput"
@@ -1717,6 +1727,7 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
                 name="numero"
                 type="text"
                 class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700"
+                :class="{ 'border-red-500': errors.numero }"
                 @keydown.enter.prevent="handleFieldEnter('numero')"
                 @keydown.tab="handleFieldTab('numero')"
               />
@@ -1737,6 +1748,7 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
                   </svg>
                 </button>
               </div>
+              <p v-if="errors.cep" class="mt-1 text-xs text-red-500">{{ errors.numero }}</p>
             </div>
 
             <!-- Complemento -->
