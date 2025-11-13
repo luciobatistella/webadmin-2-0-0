@@ -872,7 +872,25 @@ function handleSave() {
   if (payload.cep) payload.cep = onlyDigits(payload.cep)
   // Incluir flag de verificação do telefone principal
   payload.telefone1Verificado = !!phoneVerify.value.verified
+  if (payload.dataNasc) payload.dataNasc = normalizeDateFormatToServer(payload.dataNasc);
+  if (payload.dataExp) payload.dataExp = normalizeDateFormatToServer(payload.dataExp);
+  if (payload.dataEmissao) payload.dataEmissao = normalizeDateFormatToServer(payload.dataEmissao);
+  if (payload.validade) payload.validade = normalizeDateFormatToServer(payload.validade);
+  if (payload.validadeUnif) payload.validadeUnif = normalizeDateFormatToServer(payload.validadeUnif);
+  if (payload.validadeCri) payload.validadeCri = normalizeDateFormatToServer(payload.validadeCri);
+
   emit('save', payload)
+}
+
+// normaliza data de DD/MM/AAAA para MM/DD/AAAA
+function normalizeDateFormatToServer(dt: string): string {
+  if (dt.indexOf('/') >= 0) {
+    const [d, m, y] = dt.split('/');
+    return `${m}/${d}/${y}`;
+  }
+  const [y, m, d] = dt.split('-');
+  return `${m}/${d}/${y}`;
+
 }
 
 function handleCancel() {
