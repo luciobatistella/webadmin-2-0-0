@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import { listAtividades } from '../../services/clients'
-import { uploadDocument } from '../../services/storage'
+// Alterado para usar upload via backend (sem problemas de CORS)
+import { uploadDocument } from '../../services/uploadBackend'
 import { loadPublicConfig } from '../../services/http'
 
 type FormData = Record<string, any>
@@ -606,6 +607,48 @@ function confirmSMSCode(inputCode: string) {
   phoneVerify.value.error = ''
   fieldCards.value.telefone1 = true
   ;(window as any).$toast?.success?.('Telefone verificado com sucesso!')
+}
+
+// Teste de endpoint sendmail
+const testEmailSending = ref(false)
+const testEmailResult = ref<string>('')
+
+async function testSendmail() {
+  testEmailSending.value = true
+  testEmailResult.value = ''
+  
+  try {
+    const { createApi } = await import('@/services/api')
+    const cfg = await loadPublicConfig()
+    const api = createApi(cfg.api_url as string)
+    
+    const testPayload = {
+      email: form.value.email || 'teste@exemplo.com',
+      subject: 'Teste de Envio de Email - EventosSP',
+      message: 'Este é um email de teste enviado via /webadmin/sendmail. Se você recebeu esta mensagem, o endpoint está funcionando corretamente!'
+    }
+    
+    console.log('🧪 TESTE SENDMAIL')
+    console.log('📡 Endpoint:', `${cfg.api_url}/webadmin/sendmail`)
+    console.log('📦 Payload:', JSON.stringify(testPayload, null, 2))
+    
+    const response = await api.post('/webadmin/sendmail', testPayload)
+    
+    console.log('✅ Resposta:', response.data)
+    testEmailResult.value = `✅ Sucesso! Status: ${response.status}. Verifique o email: ${testPayload.email}`
+    ;(window as any).$toast?.success?.(`Email de teste enviado para ${testPayload.email}`)
+    
+  } catch (error: any) {
+    console.error('❌ Erro no teste:', error)
+    const errorMsg = error?.response?.data?.error 
+      || error?.response?.data?.message 
+      || error?.message 
+      || 'Erro desconhecido'
+    testEmailResult.value = `❌ Erro: ${errorMsg}`
+    ;(window as any).$toast?.error?.(`Erro ao testar sendmail: ${errorMsg}`)
+  } finally {
+    testEmailSending.value = false
+  }
 }
 
 function canResendEmailCode(): boolean {
@@ -1407,6 +1450,28 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
               
               <p v-if="emailVerify.error" class="mt-1 text-xs text-red-500">{{ emailVerify.error }}</p>
               <p v-if="errors.email" class="mt-1 text-xs text-red-500">{{ errors.email }}</p>
+              
+              <!-- Botão de teste do endpoint sendmail -->
+              <div class="mt-2 flex items-center gap-2">
+                <button
+                  type="button"
+                  @click="testSendmail"
+                  :disabled="testEmailSending || !form.email"
+                  class="text-xs px-3 py-1.5 rounded-lg border-2 border-dashed border-purple-400 text-purple-700 hover:bg-purple-50 disabled:opacity-50 disabled:cursor-not-allowed font-medium flex items-center gap-1.5"
+                >
+                  <svg v-if="testEmailSending" class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <svg v-else class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <span>{{ testEmailSending ? 'Testando...' : '🧪 Testar /webadmin/sendmail' }}</span>
+                </button>
+                <span v-if="testEmailResult" class="text-xs" :class="testEmailResult.startsWith('✅') ? 'text-green-600' : 'text-red-600'">
+                  {{ testEmailResult }}
+                </span>
+              </div>
             </div>
 
             <!-- Telefone 1 com verificação -->

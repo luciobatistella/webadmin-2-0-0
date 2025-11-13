@@ -29,12 +29,48 @@ function ensureFirebase() {
 export type UploadResult = { fullPath: string; downloadURL: string }
 
 export async function uploadDocument(docType: string, file: File, opts?: { cooperadoId?: string }) : Promise<UploadResult> {
-  const { storage } = ensureFirebase()
-  const ts = new Date().toISOString().replace(/[:.]/g, '-')
-  const safeName = file.name?.replace(/[^a-zA-Z0-9_.-]/g, '_') || `${docType}.bin`
-  const path = `uploads/${opts?.cooperadoId || 'anon'}/${docType}/${ts}-${safeName}`
-  const r = ref(storage, path)
-  await uploadBytes(r, file, { contentType: file.type || 'application/octet-stream' })
-  const url = await getDownloadURL(r)
-  return { fullPath: path, downloadURL: url }
+  try {
+    console.log('📤 Iniciando upload Firebase Storage')
+    console.log('  - Tipo:', docType)
+    console.log('  - Arquivo:', file.name)
+    console.log('  - Tamanho:', (file.size / 1024).toFixed(2), 'KB')
+    console.log('  - Content-Type:', file.type)
+    
+    const { storage } = ensureFirebase()
+    const ts = new Date().toISOString().replace(/[:.]/g, '-')
+    const safeName = file.name?.replace(/[^a-zA-Z0-9_.-]/g, '_') || `${docType}.bin`
+    const path = `uploads/${opts?.cooperadoId || 'anon'}/${docType}/${ts}-${safeName}`
+    
+    console.log('  - Path:', path)
+    
+    const r = ref(storage, path)
+    
+    // Metadata para garantir CORS
+    const metadata = {
+      contentType: file.type || 'application/octet-stream',
+      cacheControl: 'public, max-age=31536000',
+      customMetadata: {
+        uploadedAt: new Date().toISOString(),
+        docType: docType,
+      }
+    }
+    
+    console.log('  - Metadata:', metadata)
+    console.log('⏳ Fazendo upload...')
+    
+    const snapshot = await uploadBytes(r, file, metadata)
+    console.log('✅ Upload concluído:', snapshot.metadata.fullPath)
+    
+    console.log('🔗 Obtendo URL de download...')
+    const url = await getDownloadURL(r)
+    console.log('✅ URL obtida:', url)
+    
+    return { fullPath: path, downloadURL: url }
+  } catch (error: any) {
+    console.error('❌ Erro no upload Firebase:', error)
+    console.error('  - Code:', error.code)
+    console.error('  - Message:', error.message)
+    console.error('  - ServerResponse:', error.serverResponse)
+    throw error
+  }
 }
