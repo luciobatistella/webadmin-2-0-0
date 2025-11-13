@@ -28,7 +28,7 @@ async function onSubmit() {
     success.value = true
     // Mostra estado de sucesso rapidamente antes de navegar
     await new Promise((r) => setTimeout(r, 600))
-    router.push('/dashboard')
+    await router.push('/dashboard')
   } catch (err) {
     errorMsg.value = 'Credenciais inválidas ou erro de conexão.'
     console.error('[login][error]', err)
