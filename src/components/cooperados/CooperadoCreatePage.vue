@@ -67,10 +67,11 @@ function handleCancel() {
 }
 
 function handleSubmit() {
+  console.log('[handleSubmit]');
   // Acionar submit do formulário
   // Preferir método exposto; fallback para requestSubmit no elemento
   const comp: any = formRef.value
-  if (comp?.requestSubmit) {
+   if (typeof comp?.requestSubmit === 'function') {
     comp.requestSubmit()
     return
   }
@@ -105,7 +106,7 @@ function handleSubmit() {
         </button>
         <button
           type="button"
-          @click="handleSubmit"
+          @click.stop="handleSubmit"
           class="rounded-full bg-[#0B61F3] px-3 py-1 text-sm font-semibold text-white shadow-sm hover:bg-blue-600 disabled:opacity-50"
           :disabled="loading"
         >

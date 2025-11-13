@@ -415,7 +415,7 @@ async function fetchAllForLocalPaging(
   baseParams.set('page', '0')
 
   // Tentar limites maiores primeiro
-  const perPageCandidates = ['1000', '500', '200', '100']
+  const perPageCandidates = ['1000', '500', '200', '100', '50']
   const maxRecords = 12000 // trava de segurança para não baixar infinitamente
   const aggregated: Row[] = []
   const seen = new Set<string | number>()
