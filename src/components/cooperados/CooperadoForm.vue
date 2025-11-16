@@ -418,6 +418,7 @@ const DRAFT_FORM_KEY = 'draft:cooperado-form'
 const DRAFT_FUNCOES_KEY = 'draft:cooperado-funcoes'
 
 onMounted(() => {
+  console.log('[onMounted]')
   try {
     if (!props.initialData) {
       const raw = localStorage.getItem(DRAFT_FORM_KEY)
@@ -437,11 +438,21 @@ onMounted(() => {
           const pv = localStorage.getItem('draft:telefone1-verify')
           if (pv) Object.assign(phoneVerify.value, JSON.parse(pv))
         } catch {}
+        
       } else {
         // Mode create: zera verificação
         phoneVerify.value = { code: '', expiresAt: 0, lastSentAt: 0, verified: false, error: '', national: '', sending: false }
         try { localStorage.removeItem('draft:telefone1-verify') } catch {}
-      }
+      } 
+    }
+    if (props.mode === 'edit') {
+        emailVerify.value.verified = true
+        emailVerify.value.error = ''
+        fieldCards.value.email = true
+
+        phoneVerify.value.verified = true;
+        phoneVerify.value.error = ''
+        fieldCards.value.telefone1 = true
     }
   } catch {}
 })
@@ -1398,7 +1409,7 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
                 
                 <!-- Botão verificar -->
                 <button 
-                  v-if="!emailVerify.code || (emailVerify.code && Date.now() > emailVerify.expiresAt)"
+                  v-if="!emailVerify.code || (emailVerify.code && Date.now() > emailVerify.expiresAt) || !emailVerify.verified"
                   type="button" 
                   @click="startEmailVerification" 
                   class="rounded-full bg-[#0B61F3] px-3 h-7 text-sm font-semibold text-white shadow-sm hover:bg-blue-600 disabled:opacity-50 flex items-center gap-1.5 whitespace-nowrap" 
@@ -1479,7 +1490,7 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
                 
                 <!-- Botão verificar -->
                 <button 
-                  v-if="!phoneVerify.code || (phoneVerify.code && Date.now() > phoneVerify.expiresAt)"
+                  v-if="!phoneVerify.code || (phoneVerify.code && Date.now() > phoneVerify.expiresAt) || !phoneVerify.verified"
                   type="button" 
                   @click="startSMSVerification" 
                   class="rounded-full bg-[#0B61F3] px-3 h-7 text-sm font-semibold text-white shadow-sm hover:bg-blue-600 disabled:opacity-50 flex items-center gap-1.5 whitespace-nowrap" 

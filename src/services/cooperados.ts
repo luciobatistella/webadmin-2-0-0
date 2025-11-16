@@ -582,9 +582,10 @@ function toExpectedCreatePayload(src: any): any {
 // Atualiza dados do cooperado (depende do backend; tenta algumas rotas comuns)
 export async function updateCooperado(id: string | number, payload: any): Promise<any> {
   return tryEndpoints('put', [
-    `webadmin/cooperados/${id}`,
-    `webadmin/cooperados/update/${id}`,
-    `webadmin/cooperado/${id}`,
+    `webadmin/cooperados`,
+    // `webadmin/cooperados/${id}`,
+    // `webadmin/cooperados/update/${id}`,
+    // `webadmin/cooperados/${id}`,
   ], payload)
 }
 
@@ -593,7 +594,7 @@ export async function deleteCooperado(id: string | number): Promise<any> {
   return tryEndpoints('delete', [
     `webadmin/cooperados/${id}`,
     `webadmin/cooperados/delete/${id}`,
-    `webadmin/cooperado/${id}`,
+    `webadmin/cooperados/${id}`,
   ])
 }
 
@@ -605,7 +606,7 @@ export async function listCooperadoPayments(id: string | number, params?: URLSea
   const data = await tryEndpoints('get', [
     `webadmin/cooperados/${id}/payments`,
     `webadmin/cooperados/${id}/pagamentos`,
-    `webadmin/cooperado/${id}/pagamentos`,
+    `webadmin/cooperados/${id}/pagamentos`,
   ], null, params)
   return Array.isArray(data) ? data : (data?.data || data?.rows || [])
 }
@@ -799,7 +800,7 @@ export async function listFuncoesCooperados(): Promise<Array<{ id: number; name:
   // Tenta variações de rota conhecidas
   const raw = await tryEndpoints('get', [
     'webadmin/cooperados/funcoes',
-    'webadmin/cooperado/funcoes',
+    'webadmin/cooperados/funcoes',
     'cooperados/funcoes',
     'webadmin/funcoes',
     'webadmin/cooperados/functions',
