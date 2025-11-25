@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onActivated, watch, nextTick } from 'vue'
 import { ChatBubbleLeftEllipsisIcon } from '@heroicons/vue/24/outline'
 import Breadcrumbs from '@/components/Breadcrumbs.vue'
 import ClientActions from '@/components/ClientActions.vue'
-import { listCooperados, getCooperado, paginateCooperadosDocuments, countCooperadosStatistics, listCooperadoPayments, listCooperadoCheckins, updateCooperado, listFuncoesCooperados } from '@/services/cooperados'
+import { listCooperados, getCooperado, paginateCooperadosDocuments, countCooperadosStatistics, listCooperadoPayments, listCooperadoCheckins, updateCooperado, listFuncoesCooperados, getDocumentStatistics } from '@/services/cooperados'
 import SidePanel from '@/components/SidePanel.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { COOPERADO_DETAIL_VIEW_MODE } from '@/config/featureFlags'
@@ -138,6 +138,49 @@ const showOpStatus = ref(false)
 const opStatusFilter = ref<string>('') // '', 'disponivel', 'contratacao', 'pre_doc', 'agendado', 'trabalhando', 'concluido', 'faltou_cancelou'
 // Modo de abas por Status Operacional
 const useOpStatusTabs = ref(false)
+
+// Animação de contagem de números
+const animatedNumbers = ref<Record<string, number>>({})
+const animatedBarWidths = ref<Record<string, number>>({})
+const hasAnimatedDashboard = ref(false)
+
+function animateNumber(key: string, target: number, duration: number = 1000, delay: number = 0) {
+  setTimeout(() => {
+    const start = 0
+    const startTime = Date.now()
+    const animate = () => {
+      const now = Date.now()
+      const progress = Math.min((now - startTime) / duration, 1)
+      const easeOutQuart = 1 - Math.pow(1 - progress, 4)
+      animatedNumbers.value[key] = Math.round(start + (target - start) * easeOutQuart)
+      if (progress < 1) {
+        requestAnimationFrame(animate)
+      } else {
+        animatedNumbers.value[key] = target
+      }
+    }
+    animate()
+  }, delay)
+}
+
+function animateBarWidth(key: string, target: number, duration: number = 1000, delay: number = 0) {
+  setTimeout(() => {
+    const start = 0
+    const startTime = Date.now()
+    const animate = () => {
+      const now = Date.now()
+      const progress = Math.min((now - startTime) / duration, 1)
+      const easeOutQuart = 1 - Math.pow(1 - progress, 4)
+      animatedBarWidths.value[key] = start + (target - start) * easeOutQuart
+      if (progress < 1) {
+        requestAnimationFrame(animate)
+      } else {
+        animatedBarWidths.value[key] = target
+      }
+    }
+    animate()
+  }, delay)
+}
 const opTab = ref<string>('') // '' significa Todos no modo abas operacionais
 // Filtro de documentos (vencimentos)
 const showDocsFilter = ref(false)
@@ -254,17 +297,77 @@ const showDetailOptions = ref(false)
 // Filtro por função
 const funcaoFilter = ref('')
 const FILTRO_SEM_FUNCAO = '__SEM_FUNCAO__'
+const funcoesRankingLimit = ref(10)
+const funcoesRankingData = ref<Array<{ id: number; name: string; count: number }>>([])
 const FILTRO_COM_FUNCAO = '__COM_FUNCAO__'
 const funcoesOptions = ref<Array<{ id: number; name: string }>>([])
 const funcoesLoading = ref(false)
 const selectedFuncaoId = ref<number | null>(null)
+
+// Função para normalizar e agrupar funções similares
+function normalizeFuncaoName(name: string): string {
+  // Remove variações comuns: números, horas, especialidades, locais, níveis hierárquicos
+  return name
+    .toUpperCase()
+    .replace(/\s+\d+\s*HORAS?$/i, '') // Remove "10 HORAS", "12 HORAS"
+    .replace(/\s+\d+\s*HRS?\.?$/i, '') // Remove "10 HRS", "12 HRS", etc
+    .replace(/\s+\d+$/i, '') // Remove números no final: "2", "4", "14", etc
+    .replace(/\s+\+\d+$/i, '') // Remove "+18", "+21", etc
+    .replace(/\s+(ATENDIMENTO|ESTADIO|EVENTO|SALA|COZINHA|BAR|BARMAN|LOJA|RECEP[CÇ][AÃ]O|RESTAURANTE|CORREDOR|SOCIAL)(\s+\d+)?(\s+\d+\s*HRS?\.?)?$/i, '') // Remove locais específicos
+    .replace(/\s+ESP\.?$/i, '') // Remove "ESP."
+    .replace(/\s+(L[IÍ]DER|LIDER)$/i, '') // Remove "LIDER" ou "LÍDER"
+    .replace(/\s+CMD$/i, '') // Remove "CMD"
+    .replace(/\s+PERFIL$/i, '') // Remove "PERFIL"
+    .replace(/\s+C\s+\d+$/i, '') // Remove "C 4", "C 5", etc
+    .replace(/\s+C$/i, '') // Remove "C" solitário
+    .replace(/\s+M$/i, '') // Remove "M" solitário
+    .replace(/\s+G$/i, '') // Remove "G"
+    .replace(/\s+ESPECIAL(ISTA)?$/i, '') // Remove "ESPECIAL" ou "ESPECIALISTA"
+    .replace(/\s+I{1,3}$/i, '') // Remove "I", "II", "III"
+    .replace(/\s+JR\.?$/i, '') // Remove "JR"
+    .replace(/\s+SR\.?$/i, '') // Remove "SR"
+    .replace(/\s+P(LEN)?O$/i, '') // Remove "PLENO"
+    .replace(/\s+\([AO]\)$/i, '') // Remove "(A)" ou "(O)"
+    .replace(/\s+[A-Z]$/i, '') // Remove letra solitária no final
+    .trim()
+}
+
+function groupSimilarFuncoes(list: Array<{ id: number; name: string }>): Array<{ id: number; name: string; ids: number[] }> {
+  const groups = new Map<string, { id: number; name: string; ids: number[] }>()
+  
+  for (const item of list) {
+    const normalized = normalizeFuncaoName(item.name)
+    
+    if (groups.has(normalized)) {
+      // Adiciona o ID ao grupo existente
+      const group = groups.get(normalized)!
+      group.ids.push(item.id)
+    } else {
+      // Cria novo grupo
+      // Usa o nome original mais curto como representante do grupo
+      const existingName = groups.get(normalized)?.name || item.name
+      const shorterName = item.name.length < existingName.length ? item.name : existingName
+      
+      groups.set(normalized, {
+        id: item.id,
+        name: shorterName,
+        ids: [item.id]
+      })
+    }
+  }
+  
+  // Converte Map para Array e ordena alfabeticamente
+  return Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name))
+}
 
 async function ensureFuncoesLoaded(force = false) {
   try {
     if (!force && funcoesOptions.value.length > 0) return
     funcoesLoading.value = true
     const list = await listFuncoesCooperados()
-    funcoesOptions.value = Array.isArray(list) ? list : []
+    // Agrupa funções similares antes de atribuir
+    const grouped = groupSimilarFuncoes(Array.isArray(list) ? list : [])
+    funcoesOptions.value = grouped as any
   } catch (e) {
     console.warn('[cooperados.funcoes] falha ao carregar', e)
     funcoesOptions.value = funcoesOptions.value || []
@@ -278,12 +381,187 @@ async function onToggleFuncFilter() {
   if (showFuncFilter.value) await ensureFuncoesLoaded(false)
 }
 
+// Carregar ranking de funções
+async function loadFuncoesRanking() {
+  try {
+    const data = await listFuncoesCooperados(funcoesRankingLimit.value)
+    funcoesRankingData.value = data
+    console.log('[Dashboard] Funções carregadas:', data.length, 'exemplo:', data[0])
+  } catch (error) {
+    console.error('[Dashboard] Erro ao carregar funções:', error)
+    funcoesRankingData.value = []
+  }
+}
+
+// Carregar estatísticas de documentos
+async function loadDocumentStatistics() {
+  try {
+    const data = await getDocumentStatistics()
+    documentStatistics.value = data
+    console.log('[Dashboard] Documentos carregados:', data)
+  } catch (error) {
+    console.error('[Dashboard] Erro ao carregar documentos:', error)
+    documentStatistics.value = null
+  }
+}
+
+// Carregar estatísticas para o dashboard
+async function loadStatistics() {
+  try {
+    loadingStatistics.value = true
+    
+    // Carregar funções ranking e documentos em paralelo
+    await Promise.all([
+      loadFuncoesRanking(),
+      loadDocumentStatistics()
+    ])
+    
+    // Montar parâmetros com filtros ativos
+    const params: Record<string, any> = {}
+    
+    // Filtro de sexo
+    if (sexoFilter.value) {
+      params.sexo = sexoFilter.value
+    }
+    
+    // Filtro de situação (aba atual)
+    if (currentTab.value && currentTab.value !== 'dashboard' && currentTab.value !== 'todos') {
+      params.situacao = currentTab.value
+    }
+    
+    // Filtro de status operacional
+    if (opTab.value) {
+      params.opStatus = opTab.value
+    }
+    
+    // Filtro de estado/cidade/região
+    if (estadoFilter.value) {
+      params.uf = estadoFilter.value
+    }
+    if (cidadeFilter.value) {
+      params.cidade = cidadeFilter.value
+    }
+    if (regiaoFilter.value) {
+      params.regiao = regiaoFilter.value
+    }
+    
+    // Filtros de documentos
+    if (vencFotoPerfil.value) params.vencFoto = '1'
+    if (vencAtestado.value) params.vencAtestado = '1'
+    if (vencAntecedentes.value) params.vencAntecedentes = '1'
+    if (vencUniforme.value) params.vencUniforme = '1'
+    
+    const data = await countCooperadosStatistics(params)
+    statisticsData.value = data
+    
+    // Atualizar também os contadores das abas (remoteCounts)
+    remoteCounts.value = {
+      all: data.all || 0,
+      active: data.active || 0,
+      inactive: data.inactive || 0,
+      blocked: data.blocked || 0,
+      pending: data.pending || 0,
+    }
+  } catch (error) {
+    console.error('[Dashboard] Erro ao carregar estatísticas:', error)
+    statisticsData.value = null
+  } finally {
+    loadingStatistics.value = false
+  }
+}
+
+// Ação ao clicar em um card de estatística
+function onStatCardClick(filter: 'todos' | 'ativos' | 'inativos' | 'bloqueados' | 'pendentes' | string, type: 'situacao' | 'sexo' | 'opStatus' | 'funcao' = 'situacao') {
+  if (type === 'situacao' && ['todos', 'ativos', 'inativos', 'bloqueados', 'pendentes'].includes(filter)) {
+    // Limpar outros filtros ao selecionar situação
+    sexoFilter.value = ''
+    opTab.value = ''
+    currentTab.value = filter as any
+  } else if (type === 'sexo') {
+    // Toggle: se já estava selecionado, desselecionar
+    if (sexoFilter.value === filter) {
+      sexoFilter.value = ''
+    } else {
+      sexoFilter.value = filter // 'M' ou 'F'
+    }
+    // Não muda de aba, mantém o usuário onde está
+    opTab.value = ''
+  } else if (type === 'opStatus') {
+    // Limpar filtro de sexo ao selecionar status operacional
+    sexoFilter.value = ''
+    // Ativar modo de abas operacionais
+    useOpStatusTabs.value = true
+    opTab.value = filter // 'disponivel', 'contratacao', etc
+  } else if (type === 'funcao') {
+    // Toggle: se já estava selecionado, desselecionar
+    if (funcaoFilter.value === filter) {
+      funcaoFilter.value = ''
+    } else {
+      funcaoFilter.value = filter
+    }
+    // Não muda de aba
+    opTab.value = ''
+  }
+  
+  nextTick(() => {
+    // Recarregar estatísticas do dashboard com os novos filtros
+    if (currentTab.value === 'dashboard') {
+      loadStatistics()
+    }
+    // Recarregar lista quando não estiver no dashboard
+    if (currentTab.value !== 'dashboard') {
+      load()
+    }
+  })
+}
+
+// Funções auxiliares para o mapa do Brasil
+function getStateClass(stateId: string): string {
+  const normalizedId = stateId.toLowerCase()
+  if (normalizedId === 'br-sp') return 'state-sp state-active'
+  if (normalizedId === 'br-rj') return 'state-rj state-active'
+  if (normalizedId === 'br-mg') return 'state-mg state-active'
+  return 'state-default'
+}
+
+function getStateTooltip(stateId: string): string {
+  const normalizedId = stateId.toLowerCase()
+  if (normalizedId === 'br-sp') return 'São Paulo: 1250 cooperados'
+  if (normalizedId === 'br-rj') return 'Rio de Janeiro: 840 cooperados'
+  if (normalizedId === 'br-mg') return 'Minas Gerais: 620 cooperados'
+  return ''
+}
+
+
+
 // Tabs (Situação)
-const currentTab = ref('todos') // 'todos' | 'ativos' | 'inativos' | 'bloqueados' | 'pendentes'
+const currentTab = ref('dashboard') // 'dashboard' | 'todos' | 'ativos' | 'inativos' | 'bloqueados' | 'pendentes'
 
 // Contadores oficiais do backend
 const remoteCounts = ref<{ all: number; active: number; inactive: number; blocked: number; pending: number }>({ all: 0, active: 0, inactive: 0, blocked: 0, pending: 0 })
 
+// Dados do Dashboard
+const statisticsData = ref<{
+  all: number
+  active: number
+  inactive: number
+  blocked: number
+  pending: number
+  regioes?: Record<string, number>
+  sexo?: { M?: number; F?: number }
+  opStatus?: {
+    disponivel?: number
+    contratacao?: number
+    pre_doc?: number
+    agendado?: number
+    trabalhando?: number
+    concluido?: number
+    faltou_cancelou?: number
+  }
+} | null>(null)
+const loadingStatistics = ref(false)
+const showDebugData = ref(false)
+const documentStatistics = ref<any>(null)
 
 // Filtros adicionais
 const showStatusFilter = ref(false)
@@ -1480,6 +1758,82 @@ const funcaoCounts = computed<Record<string, number>>(() => {
 
 const totalPreFuncao = computed(() => Array.isArray(preFuncaoRows?.value) ? preFuncaoRows.value.length : 0)
 
+// Dados fake das funções (todos os cooperados - sem filtro) - Total: 5902
+const funcoesDataAll = [
+  { name: 'NÃO PREENCHEU', countM: 9, countF: 7 },
+  { name: 'GARCOM', countM: 460, countF: 280 },
+  { name: 'STEWARD', countM: 390, countF: 212 },
+  { name: 'AJUDANTE DE COZINHA', countM: 252, countF: 185 },
+  { name: 'COZINHEIRO', countM: 274, countF: 163 },
+  { name: 'ATENDENTE', countM: 125, countF: 274 },
+  { name: 'BARMAN', countM: 262, countF: 80 },
+  { name: 'CUMIM', countM: 174, countF: 126 },
+  { name: 'COPEIRO', countM: 118, countF: 134 },
+  { name: 'COORDENADOR', countM: 145, countF: 106 },
+  { name: 'AUX. LIMPEZA', countM: 76, countF: 174 },
+  { name: 'HOSTESS', countM: 11, countF: 154 },
+  { name: 'RUNNER CORREDOR', countM: 86, countF: 76 },
+  { name: 'CAIXA', countM: 38, countF: 125 },
+  { name: 'PIZZAIOLO', countM: 76, countF: 18 },
+  { name: 'BARMAN 12 ESP.', countM: 67, countF: 11 },
+  { name: 'LIDER', countM: 57, countF: 38 },
+  { name: 'GESTOR STEWARD', countM: 47, countF: 28 },
+  { name: 'CHAPELARIA', countM: 28, countF: 47 },
+  { name: 'AJUDANTE DE COZINHA ESP.', countM: 47, countF: 28 },
+  { name: 'CREDENCIAMENTO', countM: 25, countF: 47 },
+  { name: 'GARCONETE', countM: 7, countF: 60 },
+  { name: 'CONFEITEIRO', countM: 38, countF: 28 },
+  { name: 'ENCARREGADO', countM: 47, countF: 16 },
+  { name: 'COORDENADOR GARCOM', countM: 42, countF: 18 },
+  { name: 'ASG', countM: 28, countF: 30 },
+  { name: 'CUMIN ESP.', countM: 33, countF: 21 },
+  { name: 'GESTORA', countM: 4, countF: 46 },
+  { name: 'ATENDENTE CAIXA', countM: 16, countF: 33 },
+  { name: 'ESTOQUISTA', countM: 37, countF: 11 },
+  { name: 'CAMAREIRA 2', countM: 2, countF: 42 },
+  { name: 'LOGISTICO', countM: 33, countF: 7 },
+  { name: 'PADEIRO', countM: 28, countF: 11 },
+  { name: 'LAVADOR', countM: 25, countF: 12 },
+  { name: 'AÇOUGUEIRO', countM: 28, countF: 7 },
+  { name: 'AJUDANTE DE CONFEITARIA', countM: 11, countF: 21 },
+  { name: 'BARBACK', countM: 21, countF: 7 },
+  { name: 'GESTOR', countM: 16, countF: 12 },
+  { name: 'AJUDANTE GERAL M', countM: 19, countF: 7 }
+]
+
+// Ranking de funções (usa dados da API se disponíveis, senão fallback para fake)
+const funcoesRanking = computed(() => {
+  // Se temos dados da API, usar eles
+  if (funcoesRankingData.value.length > 0) {
+    return funcoesRankingData.value
+      .filter(item => item.count > 0)
+      .sort((a, b) => b.count - a.count)
+  }
+  
+  // Fallback: dados fake filtrados por gênero
+  const filtered = funcoesDataAll.map(item => {
+    let count = 0
+    if (sexoFilter.value === 'M') {
+      count = item.countM
+    } else if (sexoFilter.value === 'F') {
+      count = item.countF
+    } else {
+      count = item.countM + item.countF
+    }
+    return { name: item.name, count }
+  })
+  
+  // Ordena por contagem decrescente e remove itens com count 0
+  return filtered
+    .filter(item => item.count > 0)
+    .sort((a, b) => b.count - a.count)
+})
+
+// Total de cooperados no ranking (para cálculo de porcentagens)
+const totalCooperadosRanking = computed(() => {
+  return funcoesRanking.value.reduce((sum, item) => sum + item.count, 0)
+})
+
 
 // Contadores locais de região (fallback)
 const regiaoCounts = computed<Record<string, number>>(() => {
@@ -2103,15 +2457,169 @@ function filter() {
 function printWindow(){ (window as any).print() }
 
 
+// Watcher para animar números quando statisticsData mudar
+watch(() => statisticsData.value, (newData) => {
+  if (newData && currentTab.value === 'dashboard') {
+    const total = newData.all || 1
+    
+    // Se já animamos uma vez, apenas atualizar valores diretamente sem animação
+    if (hasAnimatedDashboard.value) {
+      // Atualizar valores instantaneamente
+      animatedNumbers.value['active'] = newData.active || 0
+      animatedNumbers.value['pending'] = newData.pending || 0
+      animatedNumbers.value['blocked'] = newData.blocked || 0
+      animatedNumbers.value['inactive'] = newData.inactive || 0
+      animatedNumbers.value['all'] = newData.all || 0
+      
+      animatedBarWidths.value['activeBar'] = (newData.active / total * 100) || 0
+      animatedBarWidths.value['pendingBar'] = (newData.pending / total * 100) || 0
+      animatedBarWidths.value['blockedBar'] = (newData.blocked / total * 100) || 0
+      animatedBarWidths.value['inactiveBar'] = (newData.inactive / total * 100) || 0
+      
+      animatedNumbers.value['sexoM'] = newData.sexo?.M || 0
+      animatedNumbers.value['sexoF'] = newData.sexo?.F || 0
+      
+      if (newData.opStatus) {
+        animatedNumbers.value['opDisponivel'] = newData.opStatus.disponivel || 0
+        animatedNumbers.value['opContratacao'] = newData.opStatus.contratacao || 0
+        animatedNumbers.value['opFaltouCancelou'] = newData.opStatus.faltou_cancelou || 0
+        animatedNumbers.value['opPreDoc'] = newData.opStatus.pre_doc || 0
+        animatedNumbers.value['opAgendado'] = newData.opStatus.agendado || 0
+        animatedNumbers.value['opTrabalhando'] = newData.opStatus.trabalhando || 0
+        animatedNumbers.value['opConcluido'] = newData.opStatus.concluido || 0
+      }
+      
+      return // Sair sem animar
+    }
+    
+    // Primeira vez: animar tudo
+    hasAnimatedDashboard.value = true
+    
+    // Animar números do Status dos Cooperados
+    animateNumber('active', newData.active || 0, 1000, 100)
+    animateNumber('pending', newData.pending || 0, 1000, 100)
+    animateNumber('blocked', newData.blocked || 0, 1000, 100)
+    animateNumber('inactive', newData.inactive || 0, 1000, 100)
+    animateNumber('all', newData.all || 0, 1000, 100)
+    
+    // Animar barras do Status dos Cooperados
+    animateBarWidth('activeBar', (newData.active / total * 100) || 0, 1000, 100)
+    animateBarWidth('pendingBar', (newData.pending / total * 100) || 0, 1000, 150)
+    animateBarWidth('blockedBar', (newData.blocked / total * 100) || 0, 1000, 200)
+    animateBarWidth('inactiveBar', (newData.inactive / total * 100) || 0, 1000, 250)
+    
+    // Animar Distribuição por Sexo
+    animateNumber('sexoM', newData.sexo?.M || 0, 1000, 200)
+    animateNumber('sexoF', newData.sexo?.F || 0, 1000, 200)
+    
+    // Animar Performance Global
+    animateNumber('performanceScore', 87, 1000, 300)
+    
+    // Animar Documentação Pendente
+    animateNumber('docFotoPerfil', 23, 1000, 200)
+    animateNumber('docFotoUniforme', 15, 1000, 200)
+    animateNumber('docAtestado', 17, 1000, 200)
+    animateNumber('docAntecedentes', 11, 1000, 200)
+    
+    // Animar Indicadores de Performance
+    animateNumber('indPontualidade', 92, 1000, 300)
+    animateNumber('indPresenca', 96, 1000, 300)
+    animateNumber('indCheckout', 88, 1000, 300)
+    animateNumber('indAvaliacao', 4.7, 1000, 300)
+    
+    // Animar Engajamento
+    animateNumber('engEventosAceitos', 342, 1000, 400)
+    animateNumber('engEventosRecusados', 28, 1000, 400)
+    animateNumber('engTaxaAceitacao', 92, 1000, 400)
+    
+    // Animar Status Operacional
+    if (newData.opStatus) {
+      animateNumber('opDisponivel', newData.opStatus.disponivel || 0, 1000, 500)
+      animateNumber('opContratacao', newData.opStatus.contratacao || 0, 1000, 500)
+      animateNumber('opFaltouCancelou', newData.opStatus.faltou_cancelou || 0, 1000, 500)
+      animateNumber('opPreDoc', newData.opStatus.pre_doc || 0, 1000, 500)
+      animateNumber('opAgendado', newData.opStatus.agendado || 0, 1000, 500)
+      animateNumber('opTrabalhando', newData.opStatus.trabalhando || 0, 1000, 500)
+      animateNumber('opConcluido', newData.opStatus.concluido || 0, 1000, 500)
+    }
+    
+    // Animar Turnover e Retenção
+    animateNumber('turnNovos', 45, 1000, 600)
+    animateNumber('turnSaidas', 12, 1000, 600)
+    animateNumber('turnSaldo', 33, 1000, 600)
+    animateNumber('turnRetencao', 97.8, 1000, 600)
+
+    // Widgets Adicionais - Disponibilidade
+    animateNumber('widgetLivres', 127, 1000, 700)
+    animateNumber('widgetAgendaCheia', 34, 1000, 700)
+    animateNumber('widgetRecusas', 8, 1000, 700)
+
+    // Widgets Adicionais - Qualidade
+    animateNumber('widgetQualidadeCompletos', 87, 1000, 750)
+    animateNumber('widgetQualidadePendencia', 9, 1000, 750)
+    animateNumber('widgetQualidadeBloqueados', 3, 1000, 750)
+    animateNumber('widgetQualidadeFotos', 1, 1000, 750)
+
+    // Widgets Adicionais - Documentos Expirando
+    animateNumber('widgetDocsAtestados', 12, 1000, 800)
+    animateNumber('widgetDocsAntecedentes', 7, 1000, 800)
+    animateNumber('widgetDocsCarteiras', 5, 1000, 800)
+    animateNumber('widgetDocsTotal', 24, 1000, 800)
+
+    // Widgets Adicionais - Risco Operacional
+    animateNumber('widgetRiscoBaixo', 4892, 1000, 850)
+    animateNumber('widgetRiscoMedio', 821, 1000, 850)
+    animateNumber('widgetRiscoAlto', 189, 1000, 850)
+
+    // Widgets Adicionais - Fidelização
+    animateNumber('widgetFidelAtivo', 3421, 1000, 900)
+    animateNumber('widgetFidelModerado', 1287, 1000, 900)
+    animateNumber('widgetFidelRisco', 673, 1000, 900)
+    animateNumber('widgetFidelInativo', 521, 1000, 900)
+
+    // Widgets Adicionais - Novos Cooperados
+    animateNumber('widgetNovosTotal', 156, 1000, 950)
+    animateNumber('widgetNovosCompletos', 124, 1000, 950)
+    animateNumber('widgetNovosIncompletos', 29, 1000, 950)
+    animateNumber('widgetNovosBloqueados', 3, 1000, 950)
+    animateNumber('widgetNovosTaxaConclusao', 79.5, 1000, 950)
+
+    // Widgets Adicionais - Engajamento
+    animateNumber('widgetEngConvites', 2847, 1000, 1000)
+    animateNumber('widgetEngAceitos', 2419, 1000, 1000)
+    animateNumber('widgetEngRecusados', 428, 1000, 1000)
+    animateNumber('widgetEngTaxa', 85, 1000, 1000)
+  }
+}, { immediate: true })
+
+// Watcher para animar barras de Funções Cadastradas
+watch(() => funcoesRanking.value, (newFuncoes) => {
+  if (newFuncoes && newFuncoes.length > 0 && currentTab.value === 'dashboard') {
+    const maxCount = newFuncoes[0]?.count || 1
+    newFuncoes.forEach((item, index) => {
+      const widthPercent = (item.count / maxCount) * 100
+      const key = `funcao_${item.name}_${index}`
+      animateBarWidth(key, widthPercent, 1000, 400 + (index * 50))
+      animateNumber(`funcaoCount_${item.name}_${index}`, item.count, 1000, 400 + (index * 50))
+    })
+  }
+}, { immediate: true })
+
 // Inicialização com restauração de estado via query e destaque do último visitado
 onMounted(async () => {
   loadCacheFromSession()
   syncFromQuery()
+  
+  // Carregar estatísticas para o dashboard ao invés de carregar cooperados automaticamente
+  await loadStatistics()
+  
+  // NÃO carregar cooperados automaticamente - usuário deve fazer busca ou clicar em card
   // Se vier do detalhe com pedido explícito de restauração, tenta restaurar do sessionStorage
-  const restored = restoreListStateIfRequested()
-  if (!restored) {
-    await load()
-  }
+  // const restored = restoreListStateIfRequested()
+  // if (!restored) {
+  //   await load()
+  // }
+  
   initializing.value = false
   restoreLastVisited()
 })
@@ -2193,8 +2701,18 @@ function restoreListStateIfRequested(): boolean {
 }
 
 // Recarrega e sincroniza ao mudar de aba (situação)
-watch(currentTab, () => {
+watch(currentTab, (newTab) => {
   if (initializing.value || syncing.value) return
+  // Resetar animações ao voltar para dashboard
+  if (newTab === 'dashboard') {
+    hasAnimatedDashboard.value = false
+  }
+  // Não recarregar ao mudar para 'todos', apenas atualizar estado
+  if (newTab === 'todos') {
+    page.value = 1
+    pushStateToQuery()
+    return
+  }
   page.value = 1
   pushStateToQuery()
   // Em paginação local, apenas re-filtra em memória; evita refetch
@@ -2258,6 +2776,19 @@ watch(funcaoFilter, () => {
   scheduleLoad()
 })
 
+// Recarregar estatísticas do dashboard quando filtros mudarem
+watch(
+  [sexoFilter, currentTab, opTab, estadoFilter, cidadeFilter, regiaoFilter, vencFotoPerfil, vencAtestado, vencAntecedentes, vencUniforme],
+  () => {
+    if (initializing.value || syncing.value) return
+    // Recarregar estatísticas se estiver no dashboard
+    if (currentTab.value === 'dashboard') {
+      loadStatistics()
+    }
+  },
+  { deep: true }
+)
+
 // Garante que a página atual esteja dentro do intervalo após mudanças no filtro (modo local, todas as abas)
 watch(filteredRows, () => {
   try {
@@ -2295,7 +2826,7 @@ watch(limit, () => {
     <header class="mb-6 flex items-center justify-between gap-3">
       <div class="flex items-center gap-2">
         <h1 class="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">Cooperados</h1>
-        <span
+        <span v-if="currentTab !== 'dashboard'"
           class="bg-blue-100 mt-1 text-blue-800 text-xs font-medium me-2 px-2.5 py-0.5 rounded-sm dark:bg-blue-900 dark:text-blue-300">
           Exibindo {{ headerRangeStart }} • {{ headerRangeEnd }} de {{ displayTotal }} registros</span>
       </div>
@@ -2319,7 +2850,7 @@ watch(limit, () => {
     <div class="card p-4 ">
       <div class="flex flex-wrap items-center gap-4">
         <!-- Campo de busca com lupa e botão limpar (igual Clientes) -->
-        <div class="relative flex-1 min-w-[300px]">
+        <div class="relative flex-1">
           <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
             <svg class="w-4 h-4 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -2328,7 +2859,7 @@ watch(limit, () => {
           </div>
           <input v-model="q" @keyup.enter="filter" @input="onSearchInput"
             class="w-full pl-10 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-600 dark:text-zinc-100"
-            :class="q ? 'pr-10' : 'pr-4'" placeholder="Buscar por nome (texto), matrícula (número) ou CPF (11 dígitos)" />
+            :class="q ? 'pr-10' : 'pr-4'" placeholder="Buscar por cooperado" />
 
           <!-- Badges de filtros ativos dentro do input -->
           <div class="absolute inset-y-0 right-8 flex items-center gap-1 overflow-x-auto max-w-[55%] pr-1">
@@ -2484,11 +3015,11 @@ watch(limit, () => {
               <div>
                 <h3 class="text-sm font-medium text-zinc-900 dark:text-zinc-100 mb-2">Sexo</h3>
                 <div class="flex gap-1">
-                  <button @click="sexoFilter = ''" class="px-2 py-1 text-xs rounded border transition-colors"
+                  <button @click="sexoFilter = ''; loadStatistics()" class="px-2 py-1 text-xs rounded border transition-colors"
                     :class="sexoFilter === '' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">Todos</button>
-                  <button @click="sexoFilter = 'M'" class="px-2 py-1 text-xs rounded border transition-colors"
+                  <button @click="sexoFilter = 'M'; loadStatistics()" class="px-2 py-1 text-xs rounded border transition-colors"
                     :class="sexoFilter === 'M' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">Masculino ({{ totalSexoM }})</button>
-                  <button @click="sexoFilter = 'F'" class="px-2 py-1 text-xs rounded border transition-colors"
+                  <button @click="sexoFilter = 'F'; loadStatistics()" class="px-2 py-1 text-xs rounded border transition-colors"
                     :class="sexoFilter === 'F' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">Feminino ({{ totalSexoF }})</button>
                 </div>
               </div>
@@ -2539,16 +3070,8 @@ watch(limit, () => {
                     </span>
                   </label>
                 </div>
-                <!-- Modo filtros (switch desligado) -->
+                </div>
                 <div v-if="!useOpStatusTabs" class="flex flex-wrap gap-1">
-                  <button @click="opStatusFilter = ''; showOpStatus=false" class="px-2 py-1 text-[11px] rounded border transition-colors"
-                    :class="opStatusFilter === '' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">
-                    Todos
-                  </button>
-                  <button @click="opStatusFilter = 'disponivel'; showOpStatus=false" class="px-2 py-1 text-[11px] rounded border transition-colors"
-                    :class="opStatusFilter === 'disponivel' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">
-                    {{ OP_STATUS_LABEL.disponivel }}
-                  </button>
                   <button @click="opStatusFilter = 'contratacao'; showOpStatus=false" class="px-2 py-1 text-[11px] rounded border transition-colors"
                     :class="opStatusFilter === 'contratacao' ? 'border-2 border-blue-600 text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 dark:hover:bg-zinc-700'">
                     {{ OP_STATUS_LABEL.contratacao }}
@@ -2614,10 +3137,7 @@ watch(limit, () => {
           </div>
         </div>
 
-
-  
-  </div>
-        <!-- Dropdown “Localização” (UF/Cidade/Região) -->
+ <!-- Dropdown “Localização” (UF/Cidade/Região) -->
         <div class="relative">
           <button @click="showLocation = !showLocation"
             class="flex items-center gap-2 px-3 py-2 text-sm border border-zinc-300 rounded-lg hover:bg-zinc-50 dark:border-zinc-600 dark:hover:bg-zinc-800"
@@ -2695,13 +3215,12 @@ watch(limit, () => {
                 </div>
               </div>
             </div>
-
           </div>
         </div>
-
+  
+  </div>
+       
       </div>
-
-
 
       <!-- Filtros avançados (sexo/estado/cidade/região) -->
       <div v-if="false" class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-4">
@@ -2738,12 +3257,15 @@ watch(limit, () => {
           </select>
         </div>
       </div>
-    </div>
-    <!-- Tabs entre os filtros e os cards -->
+
+    <!-- Tabs de Situação (Dashboard, Todos, Ativos, etc) -->
     <div class="mb-3 mt-3">
       <nav class="flex items-center gap-2 border-b border-zinc-200 dark:border-zinc-700">
         <template v-if="!useOpStatusTabs">
           <div class="flex gap-2">
+            <button @click="currentTab = 'dashboard'; loadStatistics()"
+              :class="currentTab === 'dashboard' ? 'border-b-2 border-blue-600 text-blue-700' : 'text-zinc-600'"
+              class="px-3 py-2 text-sm">📊 Dashboard</button>
             <button @click="currentTab = 'todos'"
               :class="currentTab === 'todos' ? 'border-b-2 border-blue-600 text-blue-700' : 'text-zinc-600'"
               class="px-3 py-2 text-sm">Todos <span>({{ totalTodos }})</span></button>
@@ -2789,7 +3311,7 @@ watch(limit, () => {
               class="px-3 py-2 text-sm whitespace-nowrap">{{ OP_STATUS_LABEL.faltou_cancelou }} <span>({{ opCounts.faltou_cancelou || 0 }})</span></button>
           </div>
         </template>
-        <div class="ml-auto flex items-center gap-2 text-sm">
+        <div class="ml-auto flex items-center gap-2 text-sm" v-if="currentTab !== 'dashboard'">
           <span class="text-zinc-500">Exibir</span>
           <select :value="limit" @change="setLimit(($event.target as HTMLSelectElement).value)"
             class="px-2 py-1 border border-zinc-300 rounded-md text-sm dark:bg-zinc-800 dark:border-zinc-600">
@@ -2803,8 +3325,883 @@ watch(limit, () => {
       </nav>
     </div>
 
-    <!-- Cards de cooperados (como Clientes) -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+    <!-- Dashboard: Gráficos (exibido quando currentTab === 'dashboard') -->
+    <div v-if="currentTab === 'dashboard'" class="space-y-6 mt-4">
+      <div v-if="loadingStatistics" class="space-y-6">
+        <!-- Skeleton Loader -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:col-span-2">
+            <!-- Skeleton Status dos Cooperados -->
+            <div class="card p-6 animate-pulse">
+              <div class="h-5 bg-zinc-200 dark:bg-zinc-700 rounded w-2/3 mb-4"></div>
+              <div class="space-y-3">
+                <div class="h-12 bg-zinc-200 dark:bg-zinc-700 rounded"></div>
+                <div class="h-12 bg-zinc-200 dark:bg-zinc-700 rounded"></div>
+                <div class="h-12 bg-zinc-200 dark:bg-zinc-700 rounded"></div>
+                <div class="h-12 bg-zinc-200 dark:bg-zinc-700 rounded"></div>
+              </div>
+            </div>
+            
+            <!-- Skeleton Coluna com Sexo e Documentação -->
+            <div class="space-y-4">
+              <div class="card p-4 animate-pulse">
+                <div class="h-4 bg-zinc-200 dark:bg-zinc-700 rounded w-1/2 mb-3"></div>
+                <div class="space-y-2">
+                  <div class="h-20 bg-zinc-200 dark:bg-zinc-700 rounded"></div>
+                  <div class="h-20 bg-zinc-200 dark:bg-zinc-700 rounded"></div>
+                </div>
+              </div>
+              <div class="card p-4 animate-pulse">
+                <div class="h-4 bg-zinc-200 dark:bg-zinc-700 rounded w-1/2 mb-3"></div>
+                <div class="space-y-2">
+                  <div class="h-16 bg-zinc-200 dark:bg-zinc-700 rounded"></div>
+                  <div class="h-16 bg-zinc-200 dark:bg-zinc-700 rounded"></div>
+                  <div class="h-16 bg-zinc-200 dark:bg-zinc-700 rounded"></div>
+                </div>
+              </div>
+            </div>
+            
+            <!-- Skeleton Performance Global -->
+            <div class="card p-6 animate-pulse">
+              <div class="h-5 bg-zinc-200 dark:bg-zinc-700 rounded w-2/3 mb-4"></div>
+              <div class="h-40 bg-zinc-200 dark:bg-zinc-700 rounded-full w-40 mx-auto mb-4"></div>
+              <div class="grid grid-cols-2 gap-2">
+                <div class="h-20 bg-zinc-200 dark:bg-zinc-700 rounded"></div>
+                <div class="h-20 bg-zinc-200 dark:bg-zinc-700 rounded"></div>
+                <div class="h-20 bg-zinc-200 dark:bg-zinc-700 rounded"></div>
+                <div class="h-20 bg-zinc-200 dark:bg-zinc-700 rounded"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-else-if="statisticsData" class="space-y-6">
+        <!-- Conteúdo dos Gráficos -->
+        <!-- Grid Principal: 2 colunas -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+        <!-- Grid de 3 colunas: Status dos Cooperados + Status Operacional | Coluna Sexo+Documentação | Performance Global -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:col-span-2">
+          <!-- Coluna: Status dos Cooperados + Status Operacional -->
+          <div class="space-y-4">
+          <!-- Status dos Cooperados -->
+          <div class="card p-6 dashboard-card" style="animation-delay: 0.01s">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-lg font-semibold text-zinc-800 dark:text-zinc-100">Status dos Cooperados</h3>
+              <select class="text-xs px-2 py-1 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 text-zinc-700 dark:text-zinc-300 focus:outline-none focus:ring-2 focus:ring-zinc-500">
+                <option value="hoje">Hoje</option>
+                <option value="15dias">Há 15 dias</option>
+                <option value="30dias">Há 30 dias</option>
+              </select>
+            </div>
+            <div class="space-y-3">
+              <button @click="onStatCardClick('ativos')" class="w-full text-left hover:bg-blue-50 dark:hover:bg-blue-900/10 rounded-lg p-2 -mx-2 transition-colors">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-sm text-zinc-600 dark:text-zinc-400">Ativos</span>
+                  <span class="text-sm font-bold text-blue-700 dark:text-blue-400 transition-all duration-300">{{ animatedNumbers['active'] || 0 }}</span>
+                </div>
+                <div class="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-2">
+                  <div class="bg-blue-600 h-2 rounded-full transition-all duration-700" :style="`width: ${animatedBarWidths['activeBar'] || 0}%`"></div>
+                </div>
+              </button>
+              <button @click="onStatCardClick('pendentes')" class="w-full text-left hover:bg-blue-50 dark:hover:bg-blue-900/10 rounded-lg p-2 -mx-2 transition-colors">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-sm text-zinc-600 dark:text-zinc-400">Pendentes</span>
+                  <span class="text-sm font-bold text-blue-700 dark:text-blue-400">{{ animatedNumbers['pending'] || 0 }}</span>
+                </div>
+                <div class="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-2">
+                  <div class="bg-blue-600 h-2 rounded-full transition-all duration-700" :style="`width: ${animatedBarWidths['pendingBar'] || 0}%`"></div>
+                </div>
+              </button>
+              <button @click="onStatCardClick('bloqueados')" class="w-full text-left hover:bg-blue-50 dark:hover:bg-blue-900/10 rounded-lg p-2 -mx-2 transition-colors">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-sm text-zinc-600 dark:text-zinc-400">Bloqueados</span>
+                  <span class="text-sm font-bold text-blue-700 dark:text-blue-400">{{ animatedNumbers['blocked'] || 0 }}</span>
+                </div>
+                <div class="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-2">
+                  <div class="bg-blue-600 h-2 rounded-full transition-all duration-700" :style="`width: ${animatedBarWidths['blockedBar'] || 0}%`"></div>
+                </div>
+              </button>
+              <button @click="onStatCardClick('inativos')" class="w-full text-left hover:bg-blue-50 dark:hover:bg-blue-900/10 rounded-lg p-2 -mx-2 transition-colors">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-sm text-zinc-600 dark:text-zinc-400">Inativos</span>
+                  <span class="text-sm font-bold text-blue-700 dark:text-blue-400">{{ animatedNumbers['inactive'] || 0 }}</span>
+                </div>
+                <div class="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-2">
+                  <div class="bg-blue-600 h-2 rounded-full transition-all duration-700" :style="`width: ${animatedBarWidths['inactiveBar'] || 0}%`"></div>
+                </div>
+              </button>
+            </div>
+            <div class="mt-4 pt-4 border-t border-zinc-200 dark:border-zinc-700">
+              <button @click="onStatCardClick('todos')" class="w-full text-left hover:bg-blue-50 dark:hover:bg-blue-900/10 rounded-lg p-2 -mx-2 transition-colors">
+                <div class="flex items-center justify-between">
+                  <span class="text-sm font-medium text-zinc-600 dark:text-zinc-400">Total</span>
+                  <span class="text-2xl font-bold text-blue-700 dark:text-blue-400">{{ animatedNumbers['all'] || 0 }}</span>
+                </div>
+              </button>
+            </div>
+          </div>
+
+          <!-- Status Operacional - Versão Compacta -->
+          <div v-if="statisticsData.opStatus" class="card p-4 dashboard-card" style="animation-delay: 0.02s">
+            <h3 class="text-sm font-semibold text-zinc-800 dark:text-zinc-100 mb-3">Status Operacional</h3>
+            <div class="grid grid-cols-2 gap-2">
+              <!-- Disponível -->
+              <button 
+                @click="onStatCardClick('disponivel', 'opStatus')"
+                class="bg-zinc-50 dark:bg-zinc-800/50 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 rounded-md p-2 transition-all text-left border border-zinc-200 dark:border-zinc-700">
+                <div class="flex items-center gap-2">
+                  <div class="w-6 h-6 rounded-full bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center flex-shrink-0">
+                    <svg class="w-3 h-3 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                    </svg>
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-xs text-zinc-600 dark:text-zinc-400 truncate">Disponível</div>
+                    <div class="text-lg font-bold text-emerald-700 dark:text-emerald-400">{{ animatedNumbers['opDisponivel'] || 0 }}</div>
+                  </div>
+                </div>
+              </button>
+
+              <!-- Contratação -->
+              <button 
+                @click="onStatCardClick('contratacao', 'opStatus')"
+                class="bg-zinc-50 dark:bg-zinc-800/50 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md p-2 transition-all text-left border border-zinc-200 dark:border-zinc-700">
+                <div class="flex items-center gap-2">
+                  <div class="w-6 h-6 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center flex-shrink-0">
+                    <svg class="w-3 h-3 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6" />
+                    </svg>
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-xs text-zinc-600 dark:text-zinc-400 truncate">Contratação</div>
+                    <div class="text-lg font-bold text-blue-700 dark:text-blue-400">{{ animatedNumbers['opContratacao'] || 0 }}</div>
+                  </div>
+                </div>
+              </button>
+
+              <!-- Faltou/Cancelou -->
+              <button 
+                @click="onStatCardClick('faltou_cancelou', 'opStatus')"
+                class="bg-zinc-50 dark:bg-zinc-800/50 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-md p-2 transition-all text-left border border-zinc-200 dark:border-zinc-700">
+                <div class="flex items-center gap-2">
+                  <div class="w-6 h-6 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center flex-shrink-0">
+                    <svg class="w-3 h-3 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-xs text-zinc-600 dark:text-zinc-400 truncate">Faltou/Cancel.</div>
+                    <div class="text-lg font-bold text-red-700 dark:text-red-400">{{ animatedNumbers['opFaltouCancelou'] || 0 }}</div>
+                  </div>
+                </div>
+              </button>
+
+              <!-- Pré-doc -->
+              <button 
+                @click="onStatCardClick('pre_doc', 'opStatus')"
+                class="bg-zinc-50 dark:bg-zinc-800/50 hover:bg-amber-50 dark:hover:bg-amber-900/20 rounded-md p-2 transition-all text-left border border-zinc-200 dark:border-zinc-700">
+                <div class="flex items-center gap-2">
+                  <div class="w-6 h-6 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center flex-shrink-0">
+                    <svg class="w-3 h-3 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6" />
+                    </svg>
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-xs text-zinc-600 dark:text-zinc-400 truncate">Pré-doc</div>
+                    <div class="text-lg font-bold text-amber-700 dark:text-amber-400">{{ animatedNumbers['opPreDoc'] || 0 }}</div>
+                  </div>
+                </div>
+              </button>
+
+              <!-- Agendado -->
+              <button 
+                @click="onStatCardClick('agendado', 'opStatus')"
+                class="bg-zinc-50 dark:bg-zinc-800/50 hover:bg-purple-50 dark:hover:bg-purple-900/20 rounded-md p-2 transition-all text-left border border-zinc-200 dark:border-zinc-700">
+                <div class="flex items-center gap-2">
+                  <div class="w-6 h-6 rounded-full bg-purple-100 dark:bg-purple-900/30 flex items-center justify-center flex-shrink-0">
+                    <svg class="w-3 h-3 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3" />
+                    </svg>
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-xs text-zinc-600 dark:text-zinc-400 truncate">Agendado</div>
+                    <div class="text-lg font-bold text-purple-700 dark:text-purple-400">{{ animatedNumbers['opAgendado'] || 0 }}</div>
+                  </div>
+                </div>
+              </button>
+
+              <!-- Trabalhando -->
+              <button 
+                @click="onStatCardClick('trabalhando', 'opStatus')"
+                class="bg-zinc-50 dark:bg-zinc-800/50 hover:bg-cyan-50 dark:hover:bg-cyan-900/20 rounded-md p-2 transition-all text-left border border-zinc-200 dark:border-zinc-700">
+                <div class="flex items-center gap-2">
+                  <div class="w-6 h-6 rounded-full bg-cyan-100 dark:bg-cyan-900/30 flex items-center justify-center flex-shrink-0">
+                    <svg class="w-3 h-3 text-cyan-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 13.255A23.931 23.931 0 0112 15" />
+                    </svg>
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-xs text-zinc-600 dark:text-zinc-400 truncate">Trabalhando</div>
+                    <div class="text-lg font-bold text-cyan-700 dark:text-cyan-400">{{ animatedNumbers['opTrabalhando'] || 0 }}</div>
+                  </div>
+                </div>
+              </button>
+
+              <!-- Concluído -->
+              <button 
+                @click="onStatCardClick('concluido', 'opStatus')"
+                class="bg-zinc-50 dark:bg-zinc-800/50 hover:bg-teal-50 dark:hover:bg-teal-900/20 rounded-md p-2 transition-all text-left border border-zinc-200 dark:border-zinc-700 col-span-2">
+                <div class="flex items-center gap-2">
+                  <div class="w-6 h-6 rounded-full bg-teal-100 dark:bg-teal-900/30 flex items-center justify-center flex-shrink-0">
+                    <svg class="w-3 h-3 text-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4" />
+                    </svg>
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-xs text-zinc-600 dark:text-zinc-400 truncate">Concluído</div>
+                    <div class="text-lg font-bold text-teal-700 dark:text-teal-400">{{ animatedNumbers['opConcluido'] || 0 }}</div>
+                  </div>
+                </div>
+              </button>
+            </div>
+          </div>
+          </div>
+
+          <!-- Coluna: Distribuição por Sexo + Documentação Pendente -->
+          <div class="space-y-4 dashboard-card" style="animation-delay: 0.2s">
+            <!-- Distribuição por Sexo -->
+            <div class="card p-4">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-base font-semibold text-zinc-800 dark:text-zinc-100">Distribuição por Sexo</h3>
+              <select class="text-xs px-2 py-1 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 text-zinc-700 dark:text-zinc-300 focus:outline-none focus:ring-2 focus:ring-zinc-500">
+                <option value="hoje">Hoje</option>
+                <option value="15dias">Há 15 dias</option>
+                <option value="30dias">Há 30 dias</option>
+              </select>
+            </div>
+            <div class="space-y-2">
+              <!-- Card Masculino -->
+              <button 
+                @click="onStatCardClick('M', 'sexo')"
+                class="w-full cursor-pointer transition-all p-3 rounded-lg text-left"
+                :class="sexoFilter === 'M' ? 'bg-gradient-to-br from-blue-50 to-cyan-50 dark:from-blue-900/20 dark:to-cyan-900/20 border border-blue-300 dark:border-blue-700' : 'bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-700 hover:border-zinc-300 dark:hover:border-zinc-600'"
+              >
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-xs font-medium text-blue-900 dark:text-blue-100">Masculino</span>
+                  <div class="w-6 h-6 rounded-full bg-blue-100 dark:bg-blue-900/50 flex items-center justify-center">
+                    <svg class="w-3 h-3 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                      <path d="M10 2a1 1 0 011 1v1.323l3.954 1.582 1.599-.8a1 1 0 01.894 1.79l-1.233.616 1.738 5.42a1 1 0 01-.285 1.05A3.989 3.989 0 0115 15a3.989 3.989 0 01-2.667-1.019 1 1 0 01-.285-1.05l1.715-5.349L11 6.477V16h2a1 1 0 110 2H7a1 1 0 110-2h2V6.477L6.237 7.582l1.715 5.349a1 1 0 01-.285 1.05A3.989 3.989 0 015 15a3.989 3.989 0 01-2.667-1.019 1 1 0 01-.285-1.05l1.738-5.42-1.233-.617a1 1 0 01.894-1.788l1.599.799L9 4.323V3a1 1 0 011-1z"/>
+                    </svg>
+                  </div>
+                </div>
+                <div class="text-xl font-bold text-blue-700 dark:text-blue-400">{{ animatedNumbers['sexoM'] || 0 }}</div>
+                <div class="text-xs text-blue-600 dark:text-blue-400">{{ statisticsData.all && statisticsData.sexo?.M ? Math.round((statisticsData.sexo.M / statisticsData.all) * 100) : 0 }}% do total</div>
+              </button>
+
+              <!-- Card Feminino -->
+              <button 
+                @click="onStatCardClick('F', 'sexo')"
+                class="w-full cursor-pointer transition-all p-3 rounded-lg text-left"
+                :class="sexoFilter === 'F' ? 'bg-gradient-to-br from-pink-50 to-rose-50 dark:from-pink-900/20 dark:to-rose-900/20 border border-pink-300 dark:border-pink-700' : 'bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-700 hover:border-zinc-300 dark:hover:border-zinc-600'"
+              >
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-xs font-medium text-pink-900 dark:text-pink-100">Feminino</span>
+                  <div class="w-6 h-6 rounded-full bg-pink-100 dark:bg-pink-900/50 flex items-center justify-center">
+                    <svg class="w-3 h-3 text-pink-600" fill="currentColor" viewBox="0 0 20 20">
+                      <path fill-rule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm0 10a3 3 0 100-6 3 3 0 000 6zm0 2a5 5 0 100-10 5 5 0 000 10zm1 2v3a1 1 0 11-2 0v-3a1 1 0 112 0z" clip-rule="evenodd"/>
+                    </svg>
+                  </div>
+                </div>
+                <div class="text-xl font-bold text-pink-700 dark:text-pink-400">{{ animatedNumbers['sexoF'] || 0 }}</div>
+                <div class="text-xs text-pink-600 dark:text-pink-400">{{ statisticsData.all && statisticsData.sexo?.F ? Math.round((statisticsData.sexo.F / statisticsData.all) * 100) : 0 }}% do total</div>
+              </button>
+            </div>
+          </div>
+
+          <!-- Documentação Pendente -->
+          <div class="card p-4">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-base font-semibold text-zinc-800 dark:text-zinc-100">Documentação</h3>
+            </div>
+            
+            <!-- Resumo Geral -->
+            <div v-if="documentStatistics" class="mb-3 p-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg">
+              <div class="flex items-center justify-between">
+                <div class="flex-1">
+                  <div class="text-xs text-zinc-600 dark:text-zinc-400">Pendentes</div>
+                  <div class="text-2xl font-bold text-amber-700 dark:text-amber-400">{{ documentStatistics.pendentes || 0 }}</div>
+                </div>
+                <div class="flex-1 text-right">
+                  <div class="text-xs text-zinc-600 dark:text-zinc-400">Vencidos</div>
+                  <div class="text-2xl font-bold text-red-700 dark:text-red-400">{{ documentStatistics.vencidos || 0 }}</div>
+                </div>
+              </div>
+            </div>
+            
+            <div class="grid grid-cols-2 gap-2">
+              <!-- Foto de Perfil -->
+              <div class="border border-zinc-200 dark:border-zinc-700 rounded-lg p-3">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-xs font-medium text-orange-900 dark:text-orange-100">Foto Perfil</span>
+                  <div class="w-6 h-6 rounded-full bg-orange-100 dark:bg-orange-900/50 flex items-center justify-center">
+                    <svg class="w-3 h-3 text-orange-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <div class="flex-1">
+                    <div class="text-sm font-bold text-amber-700 dark:text-amber-400">{{ documentStatistics?.porTipo?.foto_perfil?.pendentes || 0 }}</div>
+                    <div class="text-[10px] text-amber-600 dark:text-amber-400">pend.</div>
+                  </div>
+                  <div class="flex-1 text-right">
+                    <div class="text-sm font-bold text-red-700 dark:text-red-400">{{ documentStatistics?.porTipo?.foto_perfil?.vencidos || 0 }}</div>
+                    <div class="text-[10px] text-red-600 dark:text-red-400">venc.</div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Foto de Uniforme -->
+              <div class="border border-zinc-200 dark:border-zinc-700 rounded-lg p-3">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-xs font-medium text-blue-900 dark:text-blue-100">Foto Uniforme</span>
+                  <div class="w-6 h-6 rounded-full bg-blue-100 dark:bg-blue-900/50 flex items-center justify-center">
+                    <svg class="w-3 h-3 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                    </svg>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <div class="flex-1">
+                    <div class="text-sm font-bold text-amber-700 dark:text-amber-400">{{ documentStatistics?.porTipo?.foto_uniforme?.pendentes || 0 }}</div>
+                    <div class="text-[10px] text-amber-600 dark:text-amber-400">pend.</div>
+                  </div>
+                  <div class="flex-1 text-right">
+                    <div class="text-sm font-bold text-red-700 dark:text-red-400">{{ documentStatistics?.porTipo?.foto_uniforme?.vencidos || 0 }}</div>
+                    <div class="text-[10px] text-red-600 dark:text-red-400">venc.</div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Atestado Médico -->
+              <div class="border border-zinc-200 dark:border-zinc-700 rounded-lg p-3">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-xs font-medium text-red-900 dark:text-red-100">Atestado Médico</span>
+                  <div class="w-6 h-6 rounded-full bg-red-100 dark:bg-red-900/50 flex items-center justify-center">
+                    <svg class="w-3 h-3 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <div class="flex-1">
+                    <div class="text-sm font-bold text-amber-700 dark:text-amber-400">{{ documentStatistics?.porTipo?.atestado?.pendentes || 0 }}</div>
+                    <div class="text-[10px] text-amber-600 dark:text-amber-400">pend.</div>
+                  </div>
+                  <div class="flex-1 text-right">
+                    <div class="text-sm font-bold text-red-700 dark:text-red-400">{{ documentStatistics?.porTipo?.atestado?.vencidos || 0 }}</div>
+                    <div class="text-[10px] text-red-600 dark:text-red-400">venc.</div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Antecedentes Criminais -->
+              <div class="border border-zinc-200 dark:border-zinc-700 rounded-lg p-3">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-xs font-medium text-amber-900 dark:text-amber-100">Antecedentes</span>
+                  <div class="w-6 h-6 rounded-full bg-amber-100 dark:bg-amber-900/50 flex items-center justify-center">
+                    <svg class="w-3 h-3 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <div class="flex-1">
+                    <div class="text-sm font-bold text-amber-700 dark:text-amber-400">{{ documentStatistics?.porTipo?.antecedentes?.pendentes || 0 }}</div>
+                    <div class="text-[10px] text-amber-600 dark:text-amber-400">pend.</div>
+                  </div>
+                  <div class="flex-1 text-right">
+                    <div class="text-sm font-bold text-red-700 dark:text-red-400">{{ documentStatistics?.porTipo?.antecedentes?.vencidos || 0 }}</div>
+                    <div class="text-[10px] text-red-600 dark:text-red-400">venc.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            </div>
+
+          <!-- Engajamento -->
+          
+            <!-- Widget: Histórico de Engajamento -->
+            <div class="card p-6 dashboard-card" style="animation-delay: 0.05s">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-base font-semibold text-zinc-800 dark:text-zinc-100">Histórico de Engajamento</h3>
+                <select class="text-xs px-2 py-1 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 text-zinc-700 dark:text-zinc-300 focus:outline-none focus:ring-2 focus:ring-zinc-500">
+                  <option>Últimos 6 meses</option>
+                  <option>Este ano</option>
+                </select>
+              </div>
+              <div class="space-y-4">
+                <div class="grid grid-cols-3 gap-3">
+                  <div class="text-center p-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg">
+                    <div class="text-2xl font-bold text-blue-700 dark:text-blue-400">{{ animatedNumbers['widgetEngConvites']?.toLocaleString() || 0 }}</div>
+                    <div class="text-xs text-zinc-600 dark:text-zinc-400 mt-1">Convites</div>
+                  </div>
+                  <div class="text-center p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
+                    <div class="text-2xl font-bold text-green-700 dark:text-green-400">{{ animatedNumbers['widgetEngAceitos']?.toLocaleString() || 0 }}</div>
+                    <div class="text-xs text-zinc-600 dark:text-zinc-400 mt-1">Aceitos</div>
+                  </div>
+                  <div class="text-center p-3 bg-red-50 dark:bg-red-900/20 rounded-lg">
+                    <div class="text-2xl font-bold text-red-700 dark:text-red-400">{{ animatedNumbers['widgetEngRecusados'] || 0 }}</div>
+                    <div class="text-xs text-zinc-600 dark:text-zinc-400 mt-1">Recusados</div>
+                  </div>
+                </div>
+                <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                  <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm font-medium text-zinc-700 dark:text-zinc-300">Taxa de Engajamento</span>
+                    <span class="text-2xl font-bold text-blue-700 dark:text-blue-400">{{ animatedNumbers['widgetEngTaxa'] || 0 }}%</span>
+                  </div>
+                  <div class="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-2">
+                    <div class="bg-blue-600 h-2 rounded-full transition-all duration-700" :style="`width: ${animatedNumbers['widgetEngTaxa'] || 0}%`"></div>
+                  </div>
+                  <div class="mt-2 flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
+                    <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                      <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-8.707l-3-3a1 1 0 00-1.414 0l-3 3a1 1 0 001.414 1.414L9 9.414V13a1 1 0 102 0V9.414l1.293 1.293a1 1 0 001.414-1.414z" clip-rule="evenodd" />
+                    </svg>
+                    +3.2% vs mês anterior
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- Fim Coluna: Sexo + Documentação + Engajamento -->
+
+          <!-- Performance Global -->
+           
+        <div class="space-y-4">
+
+        <div class="card p-4 dashboard-card" style="animation-delay: 0.06s">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-lg font-semibold text-indigo-900 dark:text-indigo-100">Performance Global</h3>
+              <select class="text-xs px-2 py-1 rounded-md border border-indigo-300 dark:border-indigo-700 bg-white dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                <option value="hoje">Hoje</option>
+                <option value="15dias">Há 15 dias</option>
+                <option value="30dias">Há 30 dias</option>
+              </select>
+            </div>
+            <div class="flex items-center justify-center mb-4">
+              <div class="relative w-40 h-40">
+                <svg viewBox="0 0 100 100" class="transform -rotate-90">
+                  <circle cx="50" cy="50" r="45" fill="none" stroke="currentColor" stroke-width="10" class="text-indigo-200 dark:text-indigo-900/50"></circle>
+                  <circle cx="50" cy="50" r="45" fill="none" stroke="currentColor" stroke-width="10" class="text-indigo-600" 
+                    stroke-dasharray="246 282.6" stroke-linecap="round"></circle>
+                </svg>
+                <div class="absolute inset-0 flex items-center justify-center">
+                  <div class="text-center">
+                    <div class="text-4xl font-bold text-indigo-700 dark:text-indigo-400">{{ animatedNumbers['performanceScore'] || 0 }}</div>
+                    <div class="text-xs text-indigo-600 dark:text-indigo-400">/100</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="text-center mb-4">
+              <div class="inline-flex items-center gap-2 px-3 py-1 bg-green-100 dark:bg-green-900/30 rounded-full">
+                <svg class="w-4 h-4 text-green-600" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-8.707l-3-3a1 1 0 00-1.414 0l-3 3a1 1 0 001.414 1.414L9 9.414V13a1 1 0 102 0V9.414l1.293 1.293a1 1 0 001.414-1.414z" clip-rule="evenodd" />
+                </svg>
+                <span class="text-xs font-medium text-green-700 dark:text-green-400">+5 pontos vs período anterior</span>
+              </div>
+            </div>
+
+            <!-- Indicadores de Performance -->
+            <div class="pt-4 border-t border-indigo-200 dark:border-indigo-800">
+              <h4 class="text-sm font-semibold text-indigo-900 dark:text-indigo-100 mb-3">Indicadores</h4>
+              <div class="grid grid-cols-2 gap-2">
+                <!-- Pontualidade -->
+                <div class="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-950/30 dark:to-green-900/20 rounded-lg p-3 border border-green-200 dark:border-green-800/50">
+                  <div class="flex items-center gap-1.5 mb-1.5">
+                    <svg class="w-3.5 h-3.5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <span class="text-xs font-medium text-green-700 dark:text-green-400">Pontualidade</span>
+                  </div>
+                  <div class="text-xl font-bold text-green-700 dark:text-green-400">{{ animatedNumbers['indPontualidade'] || 0 }}%</div>
+                </div>
+                
+                <!-- Presença -->
+                <div class="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-950/30 dark:to-blue-900/20 rounded-lg p-3 border border-blue-200 dark:border-blue-800/50">
+                  <div class="flex items-center gap-1.5 mb-1.5">
+                    <svg class="w-3.5 h-3.5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <span class="text-xs font-medium text-blue-700 dark:text-blue-400">Presença</span>
+                  </div>
+                  <div class="text-xl font-bold text-blue-700 dark:text-blue-400">{{ animatedNumbers['indPresenca'] || 0 }}%</div>
+                </div>
+                
+                <!-- Check-out -->
+                <div class="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-950/30 dark:to-purple-900/20 rounded-lg p-3 border border-purple-200 dark:border-purple-800/50">
+                  <div class="flex items-center gap-1.5 mb-1.5">
+                    <svg class="w-3.5 h-3.5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                    </svg>
+                    <span class="text-xs font-medium text-purple-700 dark:text-purple-400">Check-out</span>
+                  </div>
+                  <div class="text-xl font-bold text-purple-700 dark:text-purple-400">{{ animatedNumbers['indCheckout'] || 0 }}%</div>
+                </div>
+                
+                <!-- Avaliação -->
+                <div class="bg-gradient-to-br from-amber-50 to-amber-100 dark:from-amber-950/30 dark:to-amber-900/20 rounded-lg p-3 border border-amber-200 dark:border-amber-800/50">
+                  <div class="flex items-center gap-1.5 mb-1.5">
+                    <svg class="w-3.5 h-3.5 text-amber-600" fill="currentColor" viewBox="0 0 20 20">
+                      <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                    </svg>
+                    <span class="text-xs font-medium text-amber-700 dark:text-amber-400">Avaliação</span>
+                  </div>
+                  <div class="text-xl font-bold text-amber-700 dark:text-amber-400">{{ (animatedNumbers['indAvaliacao'] || 0).toFixed(1) }}/5</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Turnover e Retenção -->
+         <div class="grid grid-cols-1 lg:grid-cols-1 gap-6">
+            
+            <!-- Widget: Funil de Novos Cooperados -->
+            <div class="card p-6 dashboard-card" style="animation-delay: 0.07s">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-base font-semibold text-zinc-800 dark:text-zinc-100">Novos Cooperados</h3>
+                <select class="text-xs px-2 py-1 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 text-zinc-700 dark:text-zinc-300 focus:outline-none focus:ring-2 focus:ring-zinc-500">
+                  <option>Últimos 30 dias</option>
+                  <option>Últimos 7 dias</option>
+                  <option>Hoje</option>
+                </select>
+              </div>
+              <div class="space-y-3">
+                <div class="flex items-center justify-between p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                  <div>
+                    <div class="text-sm font-medium text-zinc-700 dark:text-zinc-300">Total de cadastros</div>
+                    <div class="text-2xl font-bold text-blue-700 dark:text-blue-400 mt-1">{{ animatedNumbers['widgetNovosTotal'] || 0 }}</div>
+                  </div>
+                  <svg class="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
+                  </svg>
+                </div>
+                <div class="grid grid-cols-3 gap-3">
+                  <div class="p-3 bg-green-50 dark:bg-green-900/20 rounded-lg text-center">
+                    <div class="text-2xl font-bold text-green-700 dark:text-green-400">{{ animatedNumbers['widgetNovosCompletos'] || 0 }}</div>
+                    <div class="text-xs text-zinc-600 dark:text-zinc-400 mt-1">Completos</div>
+                  </div>
+                  <div class="p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg text-center">
+                    <div class="text-2xl font-bold text-amber-700 dark:text-amber-400">{{ animatedNumbers['widgetNovosIncompletos'] || 0 }}</div>
+                    <div class="text-xs text-zinc-600 dark:text-zinc-400 mt-1">Incompletos</div>
+                  </div>
+                  <div class="p-3 bg-red-50 dark:bg-red-900/20 rounded-lg text-center">
+                    <div class="text-2xl font-bold text-red-700 dark:text-red-400">{{ animatedNumbers['widgetNovosBloqueados'] || 0 }}</div>
+                    <div class="text-xs text-zinc-600 dark:text-zinc-400 mt-1">Bloqueados</div>
+                  </div>
+                </div>
+                <div class="mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-700">
+                  <div class="flex items-center justify-between text-sm">
+                    <span class="text-zinc-600 dark:text-zinc-400">Taxa de conclusão</span>
+                    <span class="font-semibold text-green-700 dark:text-green-400">{{ (animatedNumbers['widgetNovosTaxaConclusao'] || 0).toFixed(1) }}%</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        </div>
+
+        <!-- Funções Cadastradas (ocupa 2 colunas) -->
+        <div class="card p-6 lg:col-span-2 dashboard-card" style="animation-delay: 0.08s">
+          <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center gap-4">
+              <h3 class="text-xl font-semibold text-zinc-800 dark:text-zinc-100">Funções Cadastradas</h3>
+              <select v-model="funcoesRankingLimit" @change="loadFuncoesRanking" class="text-xs px-2 py-1 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 text-zinc-700 dark:text-zinc-300 focus:outline-none focus:ring-2 focus:ring-zinc-500">
+                <option :value="10">Top 10</option>
+                <option :value="20">Top 20</option>
+              </select>
+            </div>
+            <span class="text-sm text-zinc-500 dark:text-zinc-400">{{ funcoesRanking.length }} funções · {{ totalCooperadosRanking }} cooperados</span>
+          </div>
+          
+          <div v-if="funcoesRanking.length === 0" class="text-center py-12 text-zinc-500 dark:text-zinc-400">
+            <svg class="w-16 h-16 mx-auto mb-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
+            </svg>
+            <p class="text-base">Nenhuma função encontrada</p>
+          </div>
+
+          <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+            <button 
+              v-for="(item, index) in funcoesRanking" 
+              :key="item.name" 
+              @click="onStatCardClick(item.name, 'funcao')"
+              class="flex items-center gap-2 p-3 rounded-lg transition-all text-left"
+              :class="funcaoFilter === item.name 
+                ? 'bg-gradient-to-br from-blue-50 to-cyan-50 dark:from-blue-900/20 dark:to-cyan-900/20 border border-blue-300 dark:border-blue-700' 
+                : 'bg-zinc-50 dark:bg-zinc-800/50 border border-transparent hover:border-zinc-300 dark:hover:border-zinc-600 hover:bg-zinc-100 dark:hover:bg-zinc-700/50'"
+            >
+              <!-- Função e Barra -->
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center justify-between mb-1.5">
+                  <span class="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate" :title="item.name">
+                    {{ item.name }}
+                  </span>
+                  <span class="text-sm font-bold text-zinc-900 dark:text-zinc-100 ml-2">
+                    {{ animatedNumbers[`funcaoCount_${item.name}_${index}`] || 0 }}
+                  </span>
+                </div>
+                <div class="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-2">
+                  <div 
+                    class="h-2 rounded-full transition-all duration-700"
+                    :class="index < 10 ? 'bg-blue-600 dark:bg-blue-500' : 'bg-zinc-500'"
+                    :style="`width: ${animatedBarWidths[`funcao_${item.name}_${index}`] || 0}%`"
+                  ></div>
+                </div>
+              </div>
+            </button>
+          </div>
+        </div>
+
+        </div><!-- Fim do grid principal -->
+
+        <!-- Widgets Adicionais -->
+        <div v-if="loadingStatistics" class="mt-6 space-y-6">
+          <!-- Skeleton Loading para Widgets -->
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div v-for="n in 3" :key="'sk-w1-' + n" class="card p-6 space-y-4">
+              <div class="h-5 w-2/3 rounded bg-zinc-200 dark:bg-zinc-800 animate-pulse"></div>
+              <div class="space-y-3">
+                <div class="h-16 rounded-lg bg-zinc-100 dark:bg-zinc-800 animate-pulse"></div>
+                <div class="h-16 rounded-lg bg-zinc-100 dark:bg-zinc-800 animate-pulse"></div>
+                <div class="h-16 rounded-lg bg-zinc-100 dark:bg-zinc-800 animate-pulse"></div>
+              </div>
+            </div>
+          </div>
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div v-for="n in 3" :key="'sk-w2-' + n" class="card p-6 space-y-4">
+              <div class="h-5 w-2/3 rounded bg-zinc-200 dark:bg-zinc-800 animate-pulse"></div>
+              <div class="space-y-3">
+                <div class="h-20 rounded-lg bg-zinc-100 dark:bg-zinc-800 animate-pulse"></div>
+                <div class="h-20 rounded-lg bg-zinc-100 dark:bg-zinc-800 animate-pulse"></div>
+              </div>
+            </div>
+          </div>
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div v-for="n in 2" :key="'sk-w3-' + n" class="card p-6 space-y-4">
+              <div class="h-5 w-2/3 rounded bg-zinc-200 dark:bg-zinc-800 animate-pulse"></div>
+              <div class="space-y-3">
+                <div class="h-24 rounded-lg bg-zinc-100 dark:bg-zinc-800 animate-pulse"></div>
+                <div class="h-24 rounded-lg bg-zinc-100 dark:bg-zinc-800 animate-pulse"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-else-if="statisticsData" class="mt-6 space-y-6">
+          <!-- Linha 1: Disponibilidade + Risco Operacional + Fidelização -->
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            
+            <!-- Widget: Disponibilidade Imediata -->
+            <div class="card p-6 dashboard-card" style="animation-delay: 0.09s">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-base font-semibold text-zinc-800 dark:text-zinc-100">Disponibilidade Imediata</h3>
+                <svg class="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <div class="space-y-3">
+                <div class="flex items-center justify-between p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
+                  <span class="text-sm text-zinc-700 dark:text-zinc-300">Livres próximos 7 dias</span>
+                  <span class="text-2xl font-bold text-green-700 dark:text-green-400">{{ animatedNumbers['widgetLivres'] || 0 }}</span>
+                </div>
+                <div class="flex items-center justify-between p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg">
+                  <span class="text-sm text-zinc-700 dark:text-zinc-300">Agenda cheia</span>
+                  <span class="text-2xl font-bold text-amber-700 dark:text-amber-400">{{ animatedNumbers['widgetAgendaCheia'] || 0 }}</span>
+                </div>
+                <div class="flex items-center justify-between p-3 bg-red-50 dark:bg-red-900/20 rounded-lg">
+                  <span class="text-sm text-zinc-700 dark:text-zinc-300">Recusas seguidas (>3)</span>
+                  <span class="text-2xl font-bold text-red-700 dark:text-red-400">{{ animatedNumbers['widgetRecusas'] || 0 }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Widget: Risco Operacional -->
+            <div class="card p-6 dashboard-card" style="animation-delay: 0.1s">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-base font-semibold text-zinc-800 dark:text-zinc-100">⚠️ Risco Operacional</h3>
+                <svg class="w-5 h-5 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <div class="space-y-4">
+                <div class="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border-l-4 border-green-500">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium text-green-900 dark:text-green-100">Baixo Risco</span>
+                    <span class="text-2xl font-bold text-green-700 dark:text-green-400">{{ animatedNumbers['widgetRiscoBaixo']?.toLocaleString() || 0 }}</span>
+                  </div>
+                  <div class="text-xs text-green-700 dark:text-green-400">83% da base</div>
+                </div>
+                <div class="p-4 bg-amber-50 dark:bg-amber-900/20 rounded-lg border-l-4 border-amber-500">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium text-amber-900 dark:text-amber-100">Médio Risco</span>
+                    <span class="text-2xl font-bold text-amber-700 dark:text-amber-400">{{ animatedNumbers['widgetRiscoMedio'] || 0 }}</span>
+                  </div>
+                  <div class="text-xs text-amber-700 dark:text-amber-400">14% da base</div>
+                </div>
+                <div class="p-4 bg-red-50 dark:bg-red-900/20 rounded-lg border-l-4 border-red-500">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium text-red-900 dark:text-red-100">Alto Risco</span>
+                    <span class="text-2xl font-bold text-red-700 dark:text-red-400">{{ animatedNumbers['widgetRiscoAlto'] || 0 }}</span>
+                  </div>
+                  <div class="text-xs text-red-700 dark:text-red-400">3% da base</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Widget: Fidelização -->
+            <div class="card p-6 dashboard-card" style="animation-delay: 0.11s">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-base font-semibold text-zinc-800 dark:text-zinc-100">💙 Fidelização</h3>
+                <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <div class="space-y-3">
+                <div class="p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium text-zinc-700 dark:text-zinc-300">Ativo (últimos 15d)</span>
+                    <span class="text-xl font-bold text-green-700 dark:text-green-400">{{ animatedNumbers['widgetFidelAtivo']?.toLocaleString() || 0 }}</span>
+                  </div>
+                  <div class="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-1.5">
+                    <div class="bg-green-600 h-1.5 rounded-full transition-all duration-700" style="width: 58%"></div>
+                  </div>
+                </div>
+                <div class="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium text-zinc-700 dark:text-zinc-300">Moderado (15-30d)</span>
+                    <span class="text-xl font-bold text-blue-700 dark:text-blue-400">{{ animatedNumbers['widgetFidelModerado']?.toLocaleString() || 0 }}</span>
+                  </div>
+                  <div class="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-1.5">
+                    <div class="bg-blue-600 h-1.5 rounded-full transition-all duration-700" style="width: 22%"></div>
+                  </div>
+                </div>
+                <div class="p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium text-zinc-700 dark:text-zinc-300">Em risco (30-60d)</span>
+                    <span class="text-xl font-bold text-amber-700 dark:text-amber-400">{{ animatedNumbers['widgetFidelRisco'] || 0 }}</span>
+                  </div>
+                  <div class="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-1.5">
+                    <div class="bg-amber-600 h-1.5 rounded-full transition-all duration-700" style="width: 11%"></div>
+                  </div>
+                </div>
+                <div class="p-3 bg-red-50 dark:bg-red-900/20 rounded-lg">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium text-zinc-700 dark:text-zinc-300">Inativo (>60d)</span>
+                    <span class="text-xl font-bold text-red-700 dark:text-red-400">{{ animatedNumbers['widgetFidelInativo'] || 0 }}</span>
+                  </div>
+                  <div class="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-1.5">
+                    <div class="bg-red-600 h-1.5 rounded-full transition-all duration-700" style="width: 9%"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+       
+          </div>
+
+          <!-- Linha 2: Ranking de Liderança + Qualidade do Cadastro -->
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            
+            <!-- Widget: Top 10 Melhores Cooperados -->
+            <div class="card p-6 dashboard-card" style="animation-delay: 0.12s">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-base font-semibold text-zinc-800 dark:text-zinc-100">🏆 Top 10 Liderança</h3>
+                <select class="text-xs px-2 py-1 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 text-zinc-700 dark:text-zinc-300 focus:outline-none focus:ring-2 focus:ring-zinc-500">
+                  <option>Este mês</option>
+                  <option>Este ano</option>
+                </select>
+              </div>
+              <div class="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar">
+                <div v-for="n in 10" :key="n" class="flex items-center gap-3 p-2 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 rounded-lg cursor-pointer transition-colors">
+                  <span class="text-lg font-bold text-zinc-400 w-6">{{ n }}</span>
+                  <div class="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-purple-500 flex items-center justify-center text-white text-xs font-bold">
+                    JD
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">João da Silva</div>
+                    <div class="text-xs text-zinc-500">Score: 98.5</div>
+                  </div>
+                  <svg class="w-4 h-4 text-green-600" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-8.707l-3-3a1 1 0 00-1.414 0l-3 3a1 1 0 001.414 1.414L9 9.414V13a1 1 0 102 0V9.414l1.293 1.293a1 1 0 001.414-1.414z" clip-rule="evenodd" />
+                  </svg>
+                </div>
+              </div>
+            </div>
+
+            <!-- Widget: Qualidade do Cadastro -->
+            <div class="card p-6 dashboard-card" style="animation-delay: 0.13s">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-base font-semibold text-zinc-800 dark:text-zinc-100">Qualidade do Cadastro</h3>
+                <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <div class="mb-4">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-sm text-zinc-600 dark:text-zinc-400">Cadastros Completos</span>
+                  <span class="text-lg font-bold text-green-700 dark:text-green-400">{{ animatedNumbers['widgetQualidadeCompletos'] || 0 }}%</span>
+                </div>
+                <div class="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-2">
+                  <div class="bg-green-600 h-2 rounded-full transition-all duration-700" :style="`width: ${animatedNumbers['widgetQualidadeCompletos'] || 0}%`"></div>
+                </div>
+              </div>
+              <div class="space-y-2">
+                <div class="flex items-center justify-between text-sm">
+                  <span class="text-zinc-600 dark:text-zinc-400">Com pendência</span>
+                  <span class="font-semibold text-amber-700 dark:text-amber-400">{{ animatedNumbers['widgetQualidadePendencia'] || 0 }}%</span>
+                </div>
+                <div class="flex items-center justify-between text-sm">
+                  <span class="text-zinc-600 dark:text-zinc-400">Bloqueados</span>
+                  <span class="font-semibold text-red-700 dark:text-red-400">{{ animatedNumbers['widgetQualidadeBloqueados'] || 0 }}%</span>
+                </div>
+                <div class="flex items-center justify-between text-sm">
+                  <span class="text-zinc-600 dark:text-zinc-400">Fotos desatualizadas (>1 ano)</span>
+                  <span class="font-semibold text-zinc-700 dark:text-zinc-300">{{ animatedNumbers['widgetQualidadeFotos'] || 0 }}%</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Linha 3: Novos Cooperados + Histórico de Engajamento -->
+          
+        </div>
+
+        <!-- Debug: Dados completos da API -->
+        <div v-if="statisticsData" class="mt-6">
+          <div class="card p-6 dashboard-card" style="animation-delay: 0.14s">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-lg font-semibold text-zinc-800 dark:text-zinc-100">📊 Dados Completos da API</h3>
+              <button @click="showDebugData = !showDebugData" class="text-xs px-3 py-1.5 rounded-md bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors">
+                {{ showDebugData ? 'Ocultar' : 'Mostrar' }}
+              </button>
+            </div>
+            <div v-if="showDebugData" class="space-y-3">
+              <pre class="text-xs bg-zinc-50 dark:bg-zinc-900 p-4 rounded-lg overflow-auto max-h-[600px] text-zinc-800 dark:text-zinc-200">{{ JSON.stringify(statisticsData, null, 2) }}</pre>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- Fim v-else-if statisticsData -->
+    </div><!-- Fim v-if currentTab === 'dashboard' -->
+    
+    <!-- Cards de cooperados (como Clientes) - ocultar quando dashboard -->
+    <div v-if="currentTab !== 'dashboard'" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
       <template v-if="loading || aggregating">
         <div v-for="n in 6" :key="'sk' + n" class="card space-y-2 p-3">
           <div class="h-4 w-2/3 rounded bg-zinc-200 dark:bg-zinc-800"></div>
@@ -2943,9 +4340,8 @@ watch(limit, () => {
           </div>
         </div>
       </template>
-    </div>
+    </div><!-- Fim da lista de cooperados -->
   </section>
-  
   
   <!-- Painel lateral de detalhes do cooperado -->
   <SidePanel v-if="viewMode !== 'page'" :open="showDetail" title="Detalhes do cooperado" @close="closeDetail">
@@ -3504,6 +4900,7 @@ watch(limit, () => {
   </SidePanel>
   <!-- Paginação fixa no footer -->
   <div
+    v-if="currentTab !== 'dashboard'"
     class="fixed w-[calc(100%-15rem)] left-60 bottom-0 z-30 bg-white dark:bg-zinc-900/90 border-t border-zinc-200 dark:border-zinc-700 p-2">
     <div
       class="container max-w-[1400px] mx-auto flex flex-col sm:flex-row sm:items-center gap-2 justify-between text-sm">
@@ -3530,6 +4927,55 @@ watch(limit, () => {
 </template>
 
 <style scoped>
+/* Animações do Dashboard */
+@keyframes slideInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dashboard-card {
+  animation: slideInUp 0.6s ease-out forwards;
+  opacity: 0;
+}
+
+/* Custom scrollbar para o ranking de funções */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+:global(.dark) .custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #52525b;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+:global(.dark) .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #71717a;
+}
+
+/* Estilos para o mapa do Brasil */
+.state-default { fill: #e5e7eb; stroke: #d1d5db; stroke-width: 0.5; }
+:global(.dark) .state-default { fill: #3f3f46; stroke: #52525b; }
+.state-sp { fill: #6366f1; stroke: #4f46e5; stroke-width: 1; opacity: 0.9; }
+:global(.dark) .state-sp { fill: #818cf8; stroke: #6366f1; }
+.state-rj { fill: #0ea5e9; stroke: #0284c7; stroke-width: 1; opacity: 0.9; }
+:global(.dark) .state-rj { fill: #38bdf8; stroke: #0ea5e9; }
+.state-mg { fill: #8b5cf6; stroke: #7c3aed; stroke-width: 1; opacity: 0.9; }
+:global(.dark) .state-mg { fill: #a78bfa; stroke: #8b5cf6; }
+.state-active:hover { opacity: 1; filter: brightness(1.1); cursor: pointer; }
+
 /* Destaque com fundo e borda que desaparecem suavemente */
 .cooperado-highlight {
   /* Aproximação de Tailwind bg-amber-100/50 (bg amarelo claro com 50% opacidade) */

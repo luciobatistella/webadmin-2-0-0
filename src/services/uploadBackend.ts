@@ -1,12 +1,8 @@
 /**
  * Serviço de upload via Backend
  * 
- * Como alternativa ao Firebase Storage (que tem problemas de CORS),
- * este serviço envia arquivos diretamente para o backend,
- * que pode então:
- * 1. Salvar localmente no servidor
- * 2. Fazer upload para Firebase Storage (sem CORS pois é server-to-server)
- * 3. Enviar para qualquer outro storage (S3, Cloudinary, etc)
+ * Envia arquivos para o backend que salva em disco local.
+ * O banco de dados armazena apenas o caminho do arquivo.
  */
 
 import { createApi } from './api'
@@ -18,9 +14,8 @@ async function getApi() {
 }
 
 export type UploadResult = { 
-  fullPath: string
-  downloadURL: string
-  publicUrl?: string
+  path: string // Caminho do arquivo salvo no servidor (ex: uploads/anon/rgFrente/2025-11-13-RG.pdf)
+  url: string  // URL pública para acessar o arquivo (ex: https://api.com/uploads/...)
 }
 
 /**
@@ -69,13 +64,12 @@ export async function uploadDocument(
     console.log('✅ Upload concluído!')
     console.log('  - Resposta:', response.data)
     
-    // Adapte conforme a resposta do seu backend
+    // Backend deve retornar: { success: true, path: "caminho/arquivo", url: "https://..." }
     const result = response.data
     
     return {
-      fullPath: result.path || result.fullPath || file.name,
-      downloadURL: result.url || result.downloadURL || '',
-      publicUrl: result.publicUrl || result.url,
+      path: result.path || result.fullPath || file.name,
+      url: result.url || result.publicUrl || result.downloadURL || '',
     }
     
   } catch (error: any) {

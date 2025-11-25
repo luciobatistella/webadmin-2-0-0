@@ -776,10 +776,49 @@ export async function countCooperadosStatistics(params?: URLSearchParams | Recor
   pending: number
   regioes?: Record<string, number>
   regions?: Record<string, number>
+  sexo?: { M?: number; F?: number; masculino?: number; feminino?: number }
+  opStatus?: {
+    disponivel?: number
+    contratacao?: number
+    pre_doc?: number
+    agendado?: number
+    trabalhando?: number
+    concluido?: number
+    faltou_cancelou?: number
+  }
 }> {
   const http = await api()
   const { data } = await http.get('webadmin/cooperados/count/statistics', { params })
   const regioes = (data?.regioes ?? data?.regions ?? {}) as Record<string, number>
+  
+  // Extrair dados de sexo - pode vir como sexo.M/F, sexoM/sexoF (separado), ou masculino/feminino
+  const sexo = data?.sexo && typeof data.sexo === 'object' ? {
+    M: Number(data.sexo.M ?? data.sexo.masculino ?? 0),
+    F: Number(data.sexo.F ?? data.sexo.feminino ?? 0),
+  } : {
+    M: Number(data?.sexoM ?? data?.sexo ?? 0),
+    F: Number(data?.sexoF ?? 0),
+  }
+  
+  // Extrair dados de status operacional
+  const opStatus = data?.opStatus && typeof data.opStatus === 'object' ? {
+    disponivel: Number(data.opStatus.disponivel ?? 0),
+    contratacao: Number(data.opStatus.contratacao ?? 0),
+    pre_doc: Number(data.opStatus.pre_doc ?? 0),
+    agendado: Number(data.opStatus.agendado ?? 0),
+    trabalhando: Number(data.opStatus.trabalhando ?? 0),
+    concluido: Number(data.opStatus.concluido ?? 0),
+    faltou_cancelou: Number(data.opStatus.faltou_cancelou ?? 0),
+  } : {
+    disponivel: Number(data?.disponivel ?? 0),
+    contratacao: Number(data?.contratacao ?? 0),
+    pre_doc: Number(data?.pre_doc ?? 0),
+    agendado: Number(data?.agendado ?? 0),
+    trabalhando: Number(data?.trabalhando ?? 0),
+    concluido: Number(data?.concluido ?? 0),
+    faltou_cancelou: Number(data?.faltou_cancelou ?? 0),
+  }
+  
   return {
     all: Number(data?.all ?? 0),
     active: Number(data?.active ?? 0),
@@ -788,6 +827,8 @@ export async function countCooperadosStatistics(params?: URLSearchParams | Recor
     pending: Number(data?.pending ?? 0),
     regioes,
     regions: regioes,
+    sexo,
+    opStatus,
   }
 }
 
@@ -795,9 +836,14 @@ export async function countCooperadosStatistics(params?: URLSearchParams | Recor
  * Funções
  * ------------------------------------------------------*/
 // GET /webadmin/cooperados/funcoes => [{ id: number, name: string }]
-export async function listFuncoesCooperados(): Promise<Array<{ id: number; name: string }>> {
+export async function listFuncoesCooperados(limit?: number): Promise<Array<{ id: number; name: string; count?: number }>> {
+  // Construir query params se limit foi fornecido
+  const params = limit ? new URLSearchParams({ limit: String(limit) }) : undefined
+  const queryString = params ? `?${params.toString()}` : ''
+  
   // Tenta variações de rota conhecidas
   const raw = await tryEndpoints('get', [
+    `webadmin/cooperados/funcoes/ranking${queryString}`,
     'webadmin/cooperados/funcoes',
     'webadmin/cooperado/funcoes',
     'cooperados/funcoes',
@@ -815,15 +861,96 @@ export async function listFuncoesCooperados(): Promise<Array<{ id: number; name:
     (Array.isArray(body?.result?.items) && body.result.items) ||
     []
 
-  // Mapear para { id, name } com tolerância a campos nome/descricao
-  const mapped = (arr as any[]).map((it) => {
-    const id = Number((it as any)?.id)
-    const name = String((it as any)?.name ?? (it as any)?.nome ?? (it as any)?.descricao ?? '').trim()
-    return { id, name }
+  // Mapear para { id, name, count } com tolerância a campos nome/descricao
+  const mapped = (arr as any[]).map((it, idx) => {
+    const id = Number((it as any)?.id ?? (it as any)?.funcao_id ?? idx)
+    const name = String((it as any)?.name ?? (it as any)?.nome ?? (it as any)?.descricao ?? (it as any)?.funcao ?? (it as any)?.nome_funcao ?? '').trim()
+    const count = Number((it as any)?.count ?? (it as any)?.total ?? (it as any)?.quantidade ?? (it as any)?.qtd ?? (it as any)?.cooperados ?? 0)
+    
+    // Debug: log primeiro item para ver estrutura
+    if (idx === 0) {
+      ;(console as any).log?.('[cooperados.funcoes] first item structure:', it)
+    }
+    
+    return { id, name, count }
   }).filter(x => Number.isFinite(x.id) && x.name.length > 0)
 
-  ;(console as any).log?.('[cooperados.funcoes] loaded', { count: mapped.length })
+  ;(console as any).log?.('[cooperados.funcoes] loaded', { count: mapped.length, limit, sample: mapped.slice(0, 3) })
   return mapped
+}
+
+/** -------------------------------------------------------
+ * Estatísticas de Documentos Pendentes
+ * ------------------------------------------------------*/
+// GET /webadmin/cooperados/statistics/all-documents
+export async function getDocumentStatistics(): Promise<{
+  total?: number
+  completos?: number
+  pendentes?: number
+  vencidos?: number
+  porTipo?: Record<string, { total: number; pendentes: number; vencidos: number }>
+  [key: string]: any
+}> {
+  try {
+    const http = await api()
+    const { data } = await http.get('webadmin/cooperados/statistics/all-documents')
+    ;(console as any).log?.('[cooperados.documentos] raw data:', data)
+    
+    // A API retorna um array: [{ tipo, quantidade_vencidos, quantidade_pendentes }, ...]
+    // Mapear para estrutura esperada
+    if (Array.isArray(data)) {
+      const porTipo: Record<string, { total: number; pendentes: number; vencidos: number }> = {}
+      let totalPendentes = 0
+      let totalVencidos = 0
+      
+      data.forEach((item: any) => {
+        const tipoOriginal = String(item.tipo || '')
+        const tipo = tipoOriginal.toLowerCase().replace(/\s+/g, '_')
+        const pendentes = Number(item.quantidade_pendentes || 0)
+        const vencidos = Number(item.quantidade_vencidos || 0)
+        
+        ;(console as any).log?.('[cooperados.documentos] item:', { tipoOriginal, tipo, pendentes, vencidos })
+        
+        // Mapear nomes da API para nomes esperados no componente
+        let tipoKey = tipo
+        
+        // Mapeamentos possíveis baseado na imagem da API
+        if (tipo === 'atestadoantecedentes' || tipo === 'atestado_antecedentes') {
+          tipoKey = 'antecedentes'
+        } else if (tipo === 'atestandomedico' || tipo === 'atestado_medico') {
+          tipoKey = 'atestado'
+        } else if (tipo === 'fotoperfil' || tipo === 'foto_perfil') {
+          tipoKey = 'foto_perfil'
+        } else if (tipo === 'uniforme' || tipo === 'foto_uniforme') {
+          tipoKey = 'foto_uniforme'
+        }
+        
+        porTipo[tipoKey] = {
+          total: pendentes + vencidos,
+          pendentes,
+          vencidos
+        }
+        
+        totalPendentes += pendentes
+        totalVencidos += vencidos
+      })
+      
+      const result = {
+        total: totalPendentes + totalVencidos,
+        pendentes: totalPendentes,
+        vencidos: totalVencidos,
+        porTipo
+      }
+      
+      ;(console as any).log?.('[cooperados.documentos] mapped:', result)
+      return result
+    }
+    
+    return data || {}
+  } catch (error) {
+    console.error('[cooperados.documentos] erro:', error)
+    return {}
+  }
 }
 
 /** -------------------------------------------------------

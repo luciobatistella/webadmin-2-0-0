@@ -320,19 +320,19 @@ async function handleFileSelect(docType: DocumentType, event: Event) {
       status: 'pending',
       uploadedAt: new Date().toISOString()
     }
-    // Upload para Firebase Storage (se configurado)
+    // Upload para o backend que salva em disco
     try {
       const res = await uploadDocument(docType, file)
       // marca como aprovado após upload bem-sucedido
       documentos.value[docType].status = 'approved'
       ;(window as any).$toast?.success?.('Arquivo enviado com sucesso')
-      // opcional: anexar URL no form/payload futuro
-      ;(documentos.value as any)[docType].downloadURL = res.downloadURL
-      ;(documentos.value as any)[docType].storagePath = res.fullPath
+      // Salva o caminho do arquivo (para gravar no banco)
+      ;(documentos.value as any)[docType].filePath = res.path
+      ;(documentos.value as any)[docType].fileUrl = res.url
     } catch (e) {
       console.warn('[uploadDocument] falha', e)
       documentos.value[docType].status = 'rejected'
-      ;(window as any).$toast?.error?.('Falha ao enviar arquivo. Verifique a configuração do Firebase.')
+      ;(window as any).$toast?.error?.('Falha ao enviar arquivo.')
     }
   }
 }
@@ -404,7 +404,8 @@ const form = ref<FormData>({
   status: 'Novo',
   situacaoCooperativa: 4, // Pré-Cadastro por padrão
   cooperativa: '',
-  tipoPagto: '',
+  tipoPagto: 'PIX',
+  tipoChavePix: '',
   chavePix: '',
   banco: '',
   agencia: '',
@@ -819,34 +820,40 @@ function handleSave() {
     // também envia array 'funcoes' para backends mais novos
     payload.funcoes = funcs
   }
-  // anexar metadados dos documentos enviados ao payload (URLs e paths do Firebase)
+  // anexar metadados dos documentos enviados ao payload (caminhos e URLs)
   try {
     const docs = documentos.value
     const docsPayload: Record<string, any> = {}
-    const flatUrls: Record<string, string> = {}
     const flatPaths: Record<string, string> = {}
+    const flatUrls: Record<string, string> = {}
+    
     for (const [k, d] of Object.entries(docs)) {
-      const downloadURL = (d as any).downloadURL || ''
-      const storagePath = (d as any).storagePath || ''
+      const filePath = (d as any).filePath || '' // Caminho salvo no servidor
+      const fileUrl = (d as any).fileUrl || ''   // URL pública do arquivo
+      
       docsPayload[k] = {
         fileName: d.fileName,
         status: d.status,
         uploadedAt: d.uploadedAt,
-        downloadURL,
-        storagePath,
+        filePath,  // Caminho que será salvo no banco
+        fileUrl,   // URL para visualização
       }
-      if (downloadURL) flatUrls[k] = downloadURL
-      if (storagePath) flatPaths[k] = storagePath
+      
+      if (filePath) flatPaths[k] = filePath
+      if (fileUrl) flatUrls[k] = fileUrl
     }
+    
     payload.documentos = docsPayload
-    // mapas planos auxiliares, úteis para integrações simples
-    if (Object.keys(flatUrls).length) payload.documentUrls = flatUrls
+    // Mapas planos: { rgFrente: "caminho", rgVerso: "caminho", ... }
     if (Object.keys(flatPaths).length) payload.documentPaths = flatPaths
-    // também cria aliases planos por tipo, ex.: rgFrenteUrl, rgVersoUrl, ...
+    if (Object.keys(flatUrls).length) payload.documentUrls = flatUrls
+    
+    // Aliases individuais: rgFrentePath, rgVersoPath, etc
+    for (const [k, path] of Object.entries(flatPaths)) payload[`${k}Path`] = path
     for (const [k, url] of Object.entries(flatUrls)) payload[`${k}Url`] = url
-    for (const [k, p] of Object.entries(flatPaths)) payload[`${k}Path`] = p
-    // compat: mapear URLs para urlImg1..4 conforme sistema antigo
-    // 1: foto perfil (aqui usamos foto3x4), 2: atestado, 3: uniforme, 4: antecedentes
+    
+    // Compat com sistema antigo: urlImg1..4
+    // 1: foto perfil (foto3x4), 2: atestado, 3: uniforme, 4: antecedentes
     if (flatUrls.foto3x4) payload.urlImg1 = flatUrls.foto3x4
     if (flatUrls.atestadoMedico) payload.urlImg2 = flatUrls.atestadoMedico
     if (flatUrls.fotoUniforme) payload.urlImg3 = flatUrls.fotoUniforme
@@ -2324,26 +2331,73 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
           <!-- Chave PIX (apenas quando PIX selecionado) -->
           <div v-if="form.tipoPagto === 'PIX'">
             <label class="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">Chave PIX</label>
-            <input
-              v-if="!fieldCards.chavePix"
-              v-model="form.chavePix"
-              name="chavePix"
-              type="text"
-              placeholder="Digite a chave PIX..."
-              class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-zinc-800 dark:border-zinc-700"
-              @keydown.enter.prevent="handleFieldEnter('chavePix')"
-              @keydown.tab="handleFieldTab('chavePix')"
-            />
-            <!-- Card da Chave PIX -->
-            <div v-else class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            
+            <!-- Seletores de tipo de chave -->
+            <div class="grid grid-cols-3 gap-2 mt-2">
+              <button
+                type="button"
+                @click="form.tipoChavePix = 'CPF'; form.chavePix = form.cpf"
+                :disabled="!form.cpf"
+                :class="[
+                  'flex flex-col items-center justify-center gap-1 px-2 py-3 border rounded-lg transition-colors',
+                  !form.cpf ? 'opacity-40 cursor-not-allowed border-zinc-200 bg-zinc-50 text-zinc-400 dark:bg-zinc-900 dark:border-zinc-800' :
+                  form.tipoChavePix === 'CPF' 
+                    ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:border-blue-500' 
+                    : 'border-zinc-300 bg-white text-zinc-700 hover:border-blue-400 hover:bg-blue-50 dark:bg-zinc-800 dark:border-zinc-700 dark:hover:border-blue-500 dark:hover:bg-blue-900/20'
+                ]"
+              >
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V8a2 2 0 00-2-2h-5m-4 0V5a2 2 0 114 0v1m-4 0a2 2 0 104 0m-5 8a2 2 0 100-4 2 2 0 000 4zm0 0c1.306 0 2.417.835 2.83 2M9 14a3.001 3.001 0 00-2.83 2M15 11h3m-3 4h2" />
+                </svg>
+                <span class="text-xs font-medium">CPF</span>
+              </button>
+              <button
+                type="button"
+                @click="form.tipoChavePix = 'Email'; form.chavePix = form.email"
+                :disabled="!form.email"
+                :class="[
+                  'flex flex-col items-center justify-center gap-1 px-2 py-3 border rounded-lg transition-colors',
+                  !form.email ? 'opacity-40 cursor-not-allowed border-zinc-200 bg-zinc-50 text-zinc-400 dark:bg-zinc-900 dark:border-zinc-800' :
+                  form.tipoChavePix === 'Email' 
+                    ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:border-blue-500' 
+                    : 'border-zinc-300 bg-white text-zinc-700 hover:border-blue-400 hover:bg-blue-50 dark:bg-zinc-800 dark:border-zinc-700 dark:hover:border-blue-500 dark:hover:bg-blue-900/20'
+                ]"
+              >
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                </svg>
+                <span class="text-xs font-medium">E-mail</span>
+              </button>
+              <button
+                type="button"
+                @click="form.tipoChavePix = 'Telefone'; form.chavePix = form.telefone1"
+                :disabled="!form.telefone1"
+                :class="[
+                  'flex flex-col items-center justify-center gap-1 px-2 py-3 border rounded-lg transition-colors',
+                  !form.telefone1 ? 'opacity-40 cursor-not-allowed border-zinc-200 bg-zinc-50 text-zinc-400 dark:bg-zinc-900 dark:border-zinc-800' :
+                  form.tipoChavePix === 'Telefone' 
+                    ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:border-blue-500' 
+                    : 'border-zinc-300 bg-white text-zinc-700 hover:border-blue-400 hover:bg-blue-50 dark:bg-zinc-800 dark:border-zinc-700 dark:hover:border-blue-500 dark:hover:bg-blue-900/20'
+                ]"
+              >
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                </svg>
+                <span class="text-xs font-medium">Telefone 1</span>
+              </button>
+            </div>
+            
+            <!-- Exibir a chave selecionada -->
+            <div v-if="form.tipoChavePix && form.chavePix" class="mt-3 flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
               <div class="flex-1 min-w-0">
+                <div class="text-xs text-blue-600 mb-0.5">Chave PIX - {{ form.tipoChavePix }}</div>
                 <div class="font-medium text-blue-900 truncate">{{ form.chavePix }}</div>
               </div>
               <button
                 type="button"
-                @click="removerCard('chavePix')"
+                @click="form.tipoChavePix = ''; form.chavePix = ''"
                 class="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-100 flex-shrink-0"
-                title="Editar chave PIX"
+                title="Remover chave PIX"
                 tabindex="-1"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
