@@ -679,6 +679,8 @@ function buildApiParams(opts?: { includeDocFilters?: boolean; forStatistics?: bo
     if (vencUniforme.value) p.append('uniformeVencimento', 'true')
   }
   // NÃO enviar orderBy: ordenamos no cliente
+  p.append('orderBy', 'matricula');
+  p.append('orderDirection', 'desc');
   return p
 }
 
