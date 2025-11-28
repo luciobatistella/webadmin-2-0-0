@@ -1706,40 +1706,9 @@ watch(escalasFiltroCliente, () => {
                   <div class="font-medium">Atestado Médico</div>
                   <span class="text-[10px] px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-800">Pendente</span>
                 </div>
-                <div
-                  v-if="!requiredDocStatuses.antecedentes"
-                  class="py-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div class="min-w-0">
-                    <div class="font-medium">Antecedentes Criminais</div>
-                    <div
-                      v-if="antecedentesMessage"
-                      :class="['text-xs mt-1', antecedentesMessageClass]"
-                    >
-                      {{ antecedentesMessage }}
-                    </div>
-                    <div v-if="antecedentesLinks.length" class="mt-1 flex flex-wrap gap-2 text-xs">
-                      <a
-                        v-for="(link, idx) in antecedentesLinks"
-                        :key="link"
-                        :href="link"
-                        target="_blank"
-                        rel="noopener"
-                        class="text-blue-600 hover:underline"
-                      >
-                        Comprovante {{ idx + 1 }}
-                      </a>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    class="inline-flex items-center justify-center px-3 py-1.5 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed"
-                    @click="consultarAntecedentes"
-                    :disabled="antecedentesLoading"
-                  >
-                    <span v-if="antecedentesLoading">Consultando…</span>
-                    <span v-else>Consultar</span>
-                  </button>
+                <div v-if="!requiredDocStatuses.antecedentes" class="py-2 flex items-center justify-between">
+                  <div class="font-medium">Antecedentes Criminais</div>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-800">Pendente</span>
                 </div>
                 
               </div>

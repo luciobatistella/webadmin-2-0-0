@@ -8,6 +8,6 @@ declare module '*.vue' {
 }
 
 interface ImportMetaEnv {
-  readonly "HdV8k8qIrMSMpt4wAovkq6bxZThYZoePSYas_1-N"?: string
+  readonly "iKpHsfcyw5L4_UalJHrDTZU6EdGjgqkBi2-tMQDM"?: string
 }
 

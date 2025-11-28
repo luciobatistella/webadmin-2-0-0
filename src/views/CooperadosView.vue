@@ -181,6 +181,7 @@ function animateBarWidth(key: string, target: number, duration: number = 1000, d
     animate()
   }, delay)
 }
+
 const opTab = ref<string>('') // '' significa Todos no modo abas operacionais
 // Filtro de documentos (vencimentos)
 const showDocsFilter = ref(false)

@@ -686,6 +686,189 @@ function canResendEmailCode(): boolean {
   return now - (emailVerify.value.lastSentAt || 0) > 60_000 // 60s cooldown
 }
 
+// Consulta de Antecedentes Criminais via InfoSimples
+const antecedentesApiToken = import.meta.env.VITE_INFO_SIMPLES_TOKEN || ''
+// Usa endpoint do backend para evitar CORS
+const antecedentesApiEndpoint = '/webadmin/antecedentes-criminais'
+const antecedentesLoading = ref(false)
+const antecedentesMessage = ref('')
+const antecedentesMessageType = ref<'info' | 'error' | 'success'>('info')
+const antecedentesLinks = ref<string[]>([])
+
+// Debug: verificar se o token está sendo carregado
+console.log('[Antecedentes] Token carregado:', antecedentesApiToken ? `SIM (${antecedentesApiToken.substring(0, 10)}...)` : 'NÃO')
+console.log('[Antecedentes] Endpoint:', antecedentesApiEndpoint)
+
+const antecedentesMessageClass = computed(() => {
+  if (antecedentesMessageType.value === 'error') return 'text-red-600'
+  if (antecedentesMessageType.value === 'success') return 'text-green-600'
+  return 'text-zinc-500'
+})
+
+function toIsoDateString(val: unknown): string | null {
+  if (!val) return null
+  const raw = String(val).trim()
+  if (!raw) return null
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(raw)) {
+    const [dd, mm, yyyy] = raw.split('/')
+    return `${yyyy}-${mm}-${dd}`
+  }
+  const date = new Date(raw)
+  if (!isNaN(date.getTime())) {
+    const yyyy = date.getFullYear()
+    const mm = String(date.getMonth() + 1).padStart(2, '0')
+    const dd = String(date.getDate()).padStart(2, '0')
+    return `${yyyy}-${mm}-${dd}`
+  }
+  return null
+}
+
+function resolveGenero(): string | null {
+  const rawGenero = form.value.sexo || ''
+  const s = String(rawGenero || '').trim().toUpperCase()
+  if (!s) return null
+  if (s === 'MASCULINO' || s === 'FEMININO') return s
+  if (s.startsWith('M')) return 'MASCULINO'
+  if (s.startsWith('F')) return 'FEMININO'
+  return null
+}
+
+async function consultarAntecedentes() {
+  antecedentesLinks.value = []
+  antecedentesMessage.value = ''
+  antecedentesMessageType.value = 'info'
+
+  if (!antecedentesApiToken) {
+    antecedentesMessage.value = 'Configure a variável VITE_INFO_SIMPLES_TOKEN no ambiente.'
+    antecedentesMessageType.value = 'error'
+    return
+  }
+
+  const nome = String(form.value.nome || '').trim()
+  const birthdateIso = toIsoDateString(form.value.dataNasc)
+  const genero = resolveGenero()
+
+  if (!nome || !birthdateIso || !genero) {
+    antecedentesMessage.value = 'Preencha nome, data de nascimento e sexo para consultar.'
+    antecedentesMessageType.value = 'error'
+    return
+  }
+
+  antecedentesLoading.value = true
+  antecedentesMessage.value = 'Consultando...'
+  antecedentesMessageType.value = 'info'
+
+  try {
+    // Usar o serviço API com configuração dinâmica
+    const { createApi } = await import('@/services/api')
+    const cfg = await loadPublicConfig()
+    const api = createApi(cfg.api_url as string)
+    
+    const payload: any = {
+      nome: nome,
+      birthdate: birthdateIso
+    }
+    
+    // Adicionar parâmetros opcionais se disponíveis
+    if (form.value.cpf) {
+      payload.cpf = form.value.cpf
+    }
+    if (form.value.nomeMae) {
+      payload.nome_mae = form.value.nomeMae
+    }
+    if (form.value.nomePai) {
+      payload.nome_pai = form.value.nomePai
+    }
+    
+    console.log('[Antecedentes] Iniciando consulta...')
+    console.log('[Antecedentes] Endpoint:', antecedentesApiEndpoint)
+    console.log('[Antecedentes] Payload:', payload)
+    
+    const response = await api.post(antecedentesApiEndpoint, payload)
+    
+    const data = response.data
+    console.log('[Antecedentes] Resposta completa:', data)
+    
+    if (data.code === 200) {
+      antecedentesMessage.value = data.code_message || 'Consulta realizada com sucesso!'
+      antecedentesMessageType.value = 'success'
+      
+      // A API retorna os links em site_receipts
+      if (data.site_receipts?.length) {
+        antecedentesLinks.value = data.site_receipts
+      }
+      
+      // Mostrar informações da certidão se disponível
+      if (data.data && data.data.length > 0) {
+        const certidao = data.data[0]
+        if (certidao.conseguiu_emitir_certidao_negativa) {
+          antecedentesMessage.value = certidao.mensagem || 'Certidão negativa emitida com sucesso!'
+        }
+      }
+    } else {
+      antecedentesMessage.value = data.code_message || 'Erro na consulta'
+      antecedentesMessageType.value = 'error'
+    }
+  } catch (err: any) {
+    console.error('Erro ao consultar antecedentes:', err)
+    
+    if (err.response?.status === 404) {
+      antecedentesMessage.value = 'Endpoint não configurado no backend. É necessário criar a rota /webadmin/antecedentes-criminais no servidor.'
+    } else {
+      antecedentesMessage.value = err.message || 'Erro ao consultar'
+    }
+    
+    antecedentesMessageType.value = 'error'
+  } finally {
+    antecedentesLoading.value = false
+  }
+}
+
+// Completude do perfil
+const profileCompletion = computed(() => {
+  const criteria = {
+    info_pessoais: !!(form.value.nome && form.value.dataNasc && form.value.nomeMae && form.value.nomePai),
+    cpf_rg: !!(form.value.cpf && form.value.rg),
+    email: !!(form.value.email && emailVerify.value.verified),
+    telefone: !!(form.value.telefone1 && phoneVerify.value.verified),
+    funcoes: funcoesSelecionadas.value.length > 0,
+    cep: !!form.value.cep,
+    rg_fotos: !!(documentos.value.rgFrente.fileName && documentos.value.rgVerso.fileName),
+    foto_perfil: !!documentos.value.foto3x4.fileName,
+    foto_uniforme: !!documentos.value.fotoUniforme.fileName,
+    comprovante: !!documentos.value.comprovanteResidencia.fileName,
+    antecedentes: !!documentos.value.antecedentesCriminais.fileName,
+    atestado: !!documentos.value.atestadoMedico.fileName,
+    banco: !!(form.value.tipoPagto && (form.value.chavePix || (form.value.banco && form.value.agencia && form.value.conta)))
+  }
+  
+  const total = 13
+  const completed = Object.values(criteria).filter(Boolean).length
+  const percentage = Math.round((completed / total) * 100)
+  
+  return {
+    percentage,
+    completed,
+    total,
+    missing: {
+      info_pessoais: !criteria.info_pessoais,
+      cpf_rg: !criteria.cpf_rg,
+      email: !criteria.email,
+      telefone: !criteria.telefone,
+      funcoes: !criteria.funcoes,
+      cep: !criteria.cep,
+      rg_fotos: !criteria.rg_fotos,
+      foto_perfil: !criteria.foto_perfil,
+      foto_uniforme: !criteria.foto_uniforme,
+      comprovante: !criteria.comprovante,
+      antecedentes: !criteria.antecedentes,
+      atestado: !criteria.atestado,
+      banco: !criteria.banco
+    }
+  }
+})
+
 async function startEmailVerification() {
   errors.value.email = ''
   emailVerify.value.error = ''
@@ -1145,6 +1328,196 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
 
 <template>
   <form ref="rootForm" @submit.prevent="handleSave" class="space-y-6" autocomplete="off">
+    <!-- Complete Profile Widget -->
+    <div class="card p-6">
+      
+      
+      <div class="grid grid-cols-1 lg:grid-cols-[auto_1fr] gap-6">
+        <!-- Circular Progress -->
+        <div class="flex items-center justify-center">
+          <div class="relative w-32 h-32">
+            <svg class="transform -rotate-90 w-32 h-32">
+              <circle
+                cx="64"
+                cy="64"
+                r="56"
+                stroke="currentColor"
+                stroke-width="8"
+                fill="none"
+                class="text-zinc-200 dark:text-zinc-700"
+              />
+              <circle
+                cx="64"
+                cy="64"
+                r="56"
+                stroke="currentColor"
+                stroke-width="8"
+                fill="none"
+                :stroke-dasharray="`${2 * Math.PI * 56}`"
+                :stroke-dashoffset="`${2 * Math.PI * 56 * (1 - profileCompletion.percentage / 100)}`"
+                class="text-blue-600 dark:text-blue-500 transition-all duration-1000 ease-out"
+                stroke-linecap="round"
+              />
+            </svg>
+            <div class="absolute inset-0 flex flex-col items-center justify-center">
+              <span class="text-3xl font-bold text-blue-600 dark:text-blue-400">{{ profileCompletion.percentage }}%</span>
+              <span class="text-xs text-zinc-500 dark:text-zinc-400">Complete</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- What's Missing Section -->
+        <div class="space-y-3">
+          <h4 class="text-sm font-semibold text-zinc-700 dark:text-zinc-300">What's missing?</h4>
+          
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-sm">
+            <!-- 1. Informações Pessoais -->
+            <div class="flex items-start gap-2">
+              <div class="mt-0.5">
+                <svg v-if="!profileCompletion.missing.info_pessoais" class="w-5 h-5 text-green-600 dark:text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+                <div v-else class="w-5 h-5 border-2 border-zinc-300 dark:border-zinc-600 rounded"></div>
+              </div>
+              <span :class="profileCompletion.missing.info_pessoais ? 'text-zinc-600 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500 line-through'">Informações Pessoais</span>
+            </div>
+
+            <!-- 2. CPF e RG -->
+            <div class="flex items-start gap-2">
+              <div class="mt-0.5">
+                <svg v-if="!profileCompletion.missing.cpf_rg" class="w-5 h-5 text-green-600 dark:text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+                <div v-else class="w-5 h-5 border-2 border-zinc-300 dark:border-zinc-600 rounded"></div>
+              </div>
+              <span :class="profileCompletion.missing.cpf_rg ? 'text-zinc-600 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500 line-through'">CPF e RG</span>
+            </div>
+
+            <!-- 3. Email -->
+            <div class="flex items-start gap-2">
+              <div class="mt-0.5">
+                <svg v-if="!profileCompletion.missing.email" class="w-5 h-5 text-green-600 dark:text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+                <div v-else class="w-5 h-5 border-2 border-zinc-300 dark:border-zinc-600 rounded"></div>
+              </div>
+              <span :class="profileCompletion.missing.email ? 'text-zinc-600 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500 line-through'">Email</span>
+            </div>
+
+            <!-- 4. Telefone 1 -->
+            <div class="flex items-start gap-2">
+              <div class="mt-0.5">
+                <svg v-if="!profileCompletion.missing.telefone" class="w-5 h-5 text-green-600 dark:text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+                <div v-else class="w-5 h-5 border-2 border-zinc-300 dark:border-zinc-600 rounded"></div>
+              </div>
+              <span :class="profileCompletion.missing.telefone ? 'text-zinc-600 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500 line-through'">Telefone 1</span>
+            </div>
+
+            <!-- 5. Funções -->
+            <div class="flex items-start gap-2">
+              <div class="mt-0.5">
+                <svg v-if="!profileCompletion.missing.funcoes" class="w-5 h-5 text-green-600 dark:text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+                <div v-else class="w-5 h-5 border-2 border-zinc-300 dark:border-zinc-600 rounded"></div>
+              </div>
+              <span :class="profileCompletion.missing.funcoes ? 'text-zinc-600 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500 line-through'">Funções</span>
+            </div>
+
+            <!-- 6. CEP -->
+            <div class="flex items-start gap-2">
+              <div class="mt-0.5">
+                <svg v-if="!profileCompletion.missing.cep" class="w-5 h-5 text-green-600 dark:text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+                <div v-else class="w-5 h-5 border-2 border-zinc-300 dark:border-zinc-600 rounded"></div>
+              </div>
+              <span :class="profileCompletion.missing.cep ? 'text-zinc-600 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500 line-through'">CEP</span>
+            </div>
+
+            <!-- 7. RG Frente e Verso -->
+            <div class="flex items-start gap-2">
+              <div class="mt-0.5">
+                <svg v-if="!profileCompletion.missing.rg_fotos" class="w-5 h-5 text-green-600 dark:text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+                <div v-else class="w-5 h-5 border-2 border-zinc-300 dark:border-zinc-600 rounded"></div>
+              </div>
+              <span :class="profileCompletion.missing.rg_fotos ? 'text-zinc-600 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500 line-through'">RG Frente e Verso</span>
+            </div>
+
+            <!-- 8. Foto 3x4 -->
+            <div class="flex items-start gap-2">
+              <div class="mt-0.5">
+                <svg v-if="!profileCompletion.missing.foto_perfil" class="w-5 h-5 text-green-600 dark:text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+                <div v-else class="w-5 h-5 border-2 border-zinc-300 dark:border-zinc-600 rounded"></div>
+              </div>
+              <span :class="profileCompletion.missing.foto_perfil ? 'text-zinc-600 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500 line-through'">Foto 3x4</span>
+            </div>
+
+            <!-- 9. Foto Uniforme -->
+            <div class="flex items-start gap-2">
+              <div class="mt-0.5">
+                <svg v-if="!profileCompletion.missing.foto_uniforme" class="w-5 h-5 text-green-600 dark:text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+                <div v-else class="w-5 h-5 border-2 border-zinc-300 dark:border-zinc-600 rounded"></div>
+              </div>
+              <span :class="profileCompletion.missing.foto_uniforme ? 'text-zinc-600 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500 line-through'">Foto Uniforme</span>
+            </div>
+
+            <!-- 10. Comprovante Residência -->
+            <div class="flex items-start gap-2">
+              <div class="mt-0.5">
+                <svg v-if="!profileCompletion.missing.comprovante" class="w-5 h-5 text-green-600 dark:text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+                <div v-else class="w-5 h-5 border-2 border-zinc-300 dark:border-zinc-600 rounded"></div>
+              </div>
+              <span :class="profileCompletion.missing.comprovante ? 'text-zinc-600 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500 line-through'">Comprovante Residência</span>
+            </div>
+
+            <!-- 11. Antecedentes Criminais -->
+            <div class="flex items-start gap-2">
+              <div class="mt-0.5">
+                <svg v-if="!profileCompletion.missing.antecedentes" class="w-5 h-5 text-green-600 dark:text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+                <div v-else class="w-5 h-5 border-2 border-zinc-300 dark:border-zinc-600 rounded"></div>
+              </div>
+              <span :class="profileCompletion.missing.antecedentes ? 'text-zinc-600 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500 line-through'">Antecedentes Criminais</span>
+            </div>
+
+            <!-- 12. Atestado Médico -->
+            <div class="flex items-start gap-2">
+              <div class="mt-0.5">
+                <svg v-if="!profileCompletion.missing.atestado" class="w-5 h-5 text-green-600 dark:text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+                <div v-else class="w-5 h-5 border-2 border-zinc-300 dark:border-zinc-600 rounded"></div>
+              </div>
+              <span :class="profileCompletion.missing.atestado ? 'text-zinc-600 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500 line-through'">Atestado Médico</span>
+            </div>
+
+            <!-- 13. Dados Bancários -->
+            <div class="flex items-start gap-2">
+              <div class="mt-0.5">
+                <svg v-if="!profileCompletion.missing.banco" class="w-5 h-5 text-green-600 dark:text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                </svg>
+                <div v-else class="w-5 h-5 border-2 border-zinc-300 dark:border-zinc-600 rounded"></div>
+              </div>
+              <span :class="profileCompletion.missing.banco ? 'text-zinc-600 dark:text-zinc-400' : 'text-zinc-400 dark:text-zinc-500 line-through'">Dados Bancários</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Linha 1: Informações Pessoais + Situação Cooperativa -->
     <div class="grid grid-cols-1 lg:grid-cols-[60%_40%] gap-6">
       <!-- Informações Pessoais -->
@@ -1473,9 +1846,9 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
                   @keydown.tab="handleFieldTab('email')"
                 />
                 
-                <!-- Botão verificar -->
+                <!-- Botão verificar (só aparece se código não foi enviado ou expirou) -->
                 <button 
-                  v-if="!emailVerify.code || (emailVerify.code && Date.now() > emailVerify.expiresAt) || !emailVerify.verified"
+                  v-if="!emailVerify.code || (emailVerify.code && Date.now() > emailVerify.expiresAt)"
                   type="button" 
                   @click="startEmailVerification" 
                   class="rounded-full bg-[#0B61F3] px-3 h-7 text-sm font-semibold text-white shadow-sm hover:bg-blue-600 disabled:opacity-50 flex items-center gap-1.5 whitespace-nowrap" 
@@ -1557,9 +1930,9 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
                   @keydown.tab="handleFieldTab('telefone1')"
                 />
                 
-                <!-- Botão verificar -->
+                <!-- Botão verificar (só aparece se código não foi enviado ou expirou) -->
                 <button 
-                  v-if="!phoneVerify.code || (phoneVerify.code && Date.now() > phoneVerify.expiresAt) || !phoneVerify.verified"
+                  v-if="!phoneVerify.code || (phoneVerify.code && Date.now() > phoneVerify.expiresAt)"
                   type="button" 
                   @click="startSMSVerification" 
                   class="rounded-full bg-[#0B61F3] px-3 h-7 text-sm font-semibold text-white shadow-sm hover:bg-blue-600 disabled:opacity-50 flex items-center gap-1.5 whitespace-nowrap" 
@@ -1572,7 +1945,7 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
                   <span>{{ phoneVerify.sending ? 'Enviando...' : 'Verificar' }}</span>
                 </button>
                 
-                <!-- Input de código (verifica ao digitar 6 números ou ao dar blur/enter/tab) -->
+                <!-- Input de código (aparece quando código foi enviado e não está verificado) -->
                 <input 
                   v-if="phoneVerify.code && !phoneVerify.verified && Date.now() <= phoneVerify.expiresAt"
                   v-model="(phoneVerify as any).inputCode" 
@@ -2289,6 +2662,46 @@ defineExpose({ form, validateForm, requestSubmit, clearDraft })
                 </svg>
               </button>
             </div>
+          </div>
+        </div>
+        
+        <!-- Consulta de Antecedentes Criminais -->
+        <div v-if="!documentos.antecedentesCriminais.file" class="mt-4 pt-4 border-t border-zinc-200 dark:border-zinc-700">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div class="min-w-0 flex-1">
+              <h4 class="text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">Consulta Online de Antecedentes</h4>
+              <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                Consulte os antecedentes criminais diretamente pelo sistema (requer configuração da API InfoSimples)
+              </p>
+              <div v-if="antecedentesMessage" :class="['text-xs mt-2', antecedentesMessageClass]">
+                {{ antecedentesMessage }}
+              </div>
+              <div v-if="antecedentesLinks.length" class="mt-2 flex flex-wrap gap-2">
+                <a
+                  v-for="(link, idx) in antecedentesLinks"
+                  :key="link"
+                  :href="link"
+                  target="_blank"
+                  rel="noopener"
+                  class="text-xs text-blue-600 hover:underline"
+                >
+                  📄 Comprovante {{ idx + 1 }}
+                </a>
+              </div>
+            </div>
+            <button
+              type="button"
+              @click="consultarAntecedentes"
+              :disabled="antecedentesLoading"
+              class="inline-flex items-center justify-center px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+            >
+              <svg v-if="antecedentesLoading" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <span v-if="antecedentesLoading">Consultando...</span>
+              <span v-else>Consultar</span>
+            </button>
           </div>
         </div>
       </section>
