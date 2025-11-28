@@ -2833,9 +2833,9 @@ watch(limit, () => {
           Exibindo {{ headerRangeStart }} • {{ headerRangeEnd }} de {{ displayTotal }} registros</span>
       </div>
       <div class="flex items-center gap-2">
-        <button @click="clearCooperadosCacheAndReload" class="px-2 py-1.5 rounded border border-zinc-300 text-xs hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800" title="Limpar cache e recarregar">
+        <!-- <button @click="clearCooperadosCacheAndReload" class="px-2 py-1.5 rounded border border-zinc-300 text-xs hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800" title="Limpar cache e recarregar">
           Recarregar dados
-        </button>
+        </button> -->
         <ClientActions @print="printWindow" @create="onCreate" @action="onMoreAction" />
       </div>
     </header>
